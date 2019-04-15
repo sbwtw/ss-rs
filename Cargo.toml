@@ -1,0 +1,11 @@
+[package]
+name = "future-test"
+version = "0.1.0"
+authors = ["石博文 <sbw@sbw.so>"]
+edition = "2018"
+
+[dependencies]
+futures = "*"
+tokio = "*"
+bytes = "*"
+failure = "*"
