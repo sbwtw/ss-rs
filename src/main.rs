@@ -4,10 +4,10 @@ use futures::try_ready;
 use futures::sync::mpsc;
 use futures::sink::Sink;
 use tokio::prelude::*;
-use tokio::prelude::stream::Stream;
+use tokio::prelude::stream::{Stream, SplitSink, SplitStream};
 use tokio::io::{read_exact, write_all};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::codec::{Encoder, Decoder, Framed};
+use tokio::codec::{Encoder, Decoder, Framed, BytesCodec};
 use bytes::BytesMut;
 use bytes::buf::BufMut;
 use failure::Fail;
@@ -85,7 +85,7 @@ fn create_connection(socket: TcpStream) -> impl Future<Item = (TcpStream, TcpStr
                         Ok((socket, IpAddr::V4(ip)))
                     })
             }
-            _ => panic!(),
+            t @ _ => panic!("atyp type not handled: {}", t),
         }
     })
     .and_then(|(socket, ip)| {
@@ -101,9 +101,30 @@ fn create_connection(socket: TcpStream) -> impl Future<Item = (TcpStream, TcpStr
             .map_err(|e| e.into())
             .and_then(move |serv_socket| Ok((socket, serv_socket)))
     })
+    .and_then(|(sock, serv_sock)| {
+        let addr = serv_sock.local_addr().unwrap();
+        let mut buf = vec![0x05, 0x00, 0x00];
+        buf.push(0x01);
+        match addr.ip() {
+            IpAddr::V4(ipv4) => {
+                buf.append(&mut ipv4.octets().to_vec());
+            },
+            _ => panic!(),
+        }
+        buf.push(((addr.port() >> 8) & 0xff) as u8);
+        buf.push(((addr.port()     ) & 0xff) as u8);
+
+        println!("relay {:?} --> {:?} --> {:?} --> {:?}", sock.local_addr(), sock.peer_addr(), serv_sock.local_addr(), serv_sock.peer_addr());
+
+        write_all(sock, buf)
+            .map_err(|e| e.into())
+            .map(move |(sock, _)| (sock, serv_sock))
+    })
 }
 
 struct Transfer {
+    src: TcpStream,
+    dst: TcpStream,
 }
 
 impl Future for Transfer {
@@ -120,7 +141,42 @@ impl Transfer {
         println!("relay {:?} --> {:?} --> {:?} --> {:?}", socket.local_addr(), socket.peer_addr(), serv_socket.local_addr(), serv_socket.peer_addr());
 
         Self {
+            src: socket,
+            dst: serv_socket,
         }
+    }
+}
+
+struct BytesForward(());
+
+impl BytesForward {
+    pub fn new() -> Self {
+        BytesForward(())
+    }
+}
+
+impl Decoder for BytesForward {
+    type Item = BytesMut;
+    type Error = failure::Error;
+
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if buf.len() > 0 {
+            let len = buf.len();
+            Ok(Some(buf.split_to(len)))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl Encoder for BytesForward {
+    type Item = BytesMut;
+    type Error = failure::Error;
+
+    fn encode(&mut self, data: BytesMut, buf: &mut BytesMut) -> Result<(), Self::Error> {
+        buf.reserve(data.len());
+        buf.put(data);
+        Ok(())
     }
 }
 
@@ -137,7 +193,20 @@ fn main() {
                 create_connection(socket)
             })
             .and_then(|(socket, serv_socket)| {
-                Transfer::new(socket, serv_socket)
+
+                let src_frame = BytesForward::new().framed(socket);
+                let dst_frame = BytesForward::new().framed(serv_socket);
+                let (src_sink, src_stream) = src_frame.split();
+                let (dst_sink, dst_stream) = dst_frame.split();
+
+                //let a = src_stream.forward(dst_sink).map_err(|_| ()).map(|_| ());
+                //let b = dst_stream.forward(src_sink).map_err(|_| ()).map(|_| ());
+                let a = src_stream.forward(dst_sink);
+                let b = dst_stream.forward(src_sink);
+
+                tokio::spawn(a.map_err(|_| ()).and_then(|_| Ok(())));
+                tokio::spawn(b.map_err(|_| ()).and_then(|_| Ok(())));
+                Ok(())
             })
             .map_err(|e| println!("Server Error: {}", e));
 
