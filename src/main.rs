@@ -12,8 +12,9 @@ use bytes::BytesMut;
 use bytes::buf::BufMut;
 use failure::Fail;
 
-use std::net::{SocketAddr, IpAddr, Ipv4Addr};
+use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
 
 #[derive(Debug, Fail)]
 enum HandshakeError {
@@ -68,6 +69,43 @@ fn handshake(socket: TcpStream) -> impl Future<Item = TcpStream, Error = failure
     })
 }
 
+fn parse_ip(socket: TcpStream, atyp: u8) -> Box<Future<Item = (TcpStream, IpAddr), Error = failure::Error> + Send> {
+    match atyp {
+        // domain
+        0x03 => {
+            unimplemented!()
+        },
+        // Ipv4 Addr
+        0x01 => {
+            Box::new(read_exact(socket, [0u8; 4])
+                .map_err(|e| e.into())
+                .and_then(|(socket, buf)| {
+                    let ip = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
+                    Ok((socket, IpAddr::V4(ip)))
+                }))
+        },
+        // Ipv6 Addr
+        0x04 => {
+            Box::new(read_exact(socket, [0u8; 16])
+                .map_err(|e| e.into())
+                .and_then(|(socket, buf)| {
+                    let a = u16::from_be_bytes([buf[0], buf[1]]);
+                    let b = u16::from_be_bytes([buf[2], buf[3]]);
+                    let c = u16::from_be_bytes([buf[4], buf[5]]);
+                    let d = u16::from_be_bytes([buf[6], buf[7]]);
+                    let e = u16::from_be_bytes([buf[8], buf[9]]);
+                    let f = u16::from_be_bytes([buf[10], buf[11]]);
+                    let g = u16::from_be_bytes([buf[12], buf[13]]);
+                    let h = u16::from_be_bytes([buf[14], buf[15]]);
+
+                    let ip = Ipv6Addr::new(a, b, c, d, e, f, g, h);
+                    Ok((socket, IpAddr::V6(ip)))
+                }))
+        },
+        _ => unreachable!(),
+    }
+}
+
 fn create_connection(socket: TcpStream) -> impl Future<Item = (TcpStream, TcpStream), Error = failure::Error> {
     read_exact(socket, [0u8; 4])
         .map_err(|e| e.into())
@@ -75,19 +113,7 @@ fn create_connection(socket: TcpStream) -> impl Future<Item = (TcpStream, TcpStr
             assert!(buf[0] == 0x05 && buf[1] == 0x01 && buf[2] == 0x00);
             Ok((socket, buf[3]))
         })
-    .and_then(|(socket, atyp)| {
-        match atyp {
-            0x01 => {
-                read_exact(socket, [0u8; 4])
-                    .map_err(|e| e.into())
-                    .and_then(|(socket, buf)| {
-                        let ip = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
-                        Ok((socket, IpAddr::V4(ip)))
-                    })
-            }
-            t @ _ => panic!("atyp type not handled: {}", t),
-        }
-    })
+    .and_then(|(socket, atyp)| parse_ip(socket, atyp))
     .and_then(|(socket, ip)| {
         read_exact(socket, [0u8; 2])
             .map_err(|e| e.into())
@@ -97,52 +123,69 @@ fn create_connection(socket: TcpStream) -> impl Future<Item = (TcpStream, TcpStr
             })
     })
     .and_then(|(socket, addr)| {
+        println!("{:?}", addr);
         TcpStream::connect(&addr)
             .map_err(|e| e.into())
             .and_then(move |serv_socket| Ok((socket, serv_socket)))
     })
     .and_then(|(sock, serv_sock)| {
-        let addr = serv_sock.local_addr().unwrap();
-        let mut buf = vec![0x05, 0x00, 0x00];
-        buf.push(0x01);
-        match addr.ip() {
-            IpAddr::V4(ipv4) => {
-                buf.append(&mut ipv4.octets().to_vec());
-            },
-            _ => panic!(),
-        }
-        buf.push(((addr.port() >> 8) & 0xff) as u8);
-        buf.push(((addr.port()     ) & 0xff) as u8);
-
-        println!("relay {:?} --> {:?} --> {:?} --> {:?}", sock.local_addr(), sock.peer_addr(), serv_sock.local_addr(), serv_sock.peer_addr());
-
+        // fake data, client won't really use it!
+        let buf = vec![0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
         write_all(sock, buf)
             .map_err(|e| e.into())
             .map(move |(sock, _)| (sock, serv_sock))
     })
 }
 
-struct Transfer {
-    src: TcpStream,
-    dst: TcpStream,
+struct Transfer<S: Sink, T: Stream> {
+    sink: S,
+    stream: T,
+
+    buf: Option<BytesMut>,
 }
 
-impl Future for Transfer {
+impl<S, T> Future for Transfer<S, T>
+    where S: Sink<SinkItem = BytesMut, SinkError = failure::Error>,
+          T: Stream<Item = BytesMut, Error = failure::Error> {
     type Item = ();
     type Error = failure::Error;
 
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        Ok(Async::Ready(()))
+        loop {
+            // read
+            if let Some(b) = try_ready!(self.stream.poll()) {
+                match self.buf.as_mut() {
+                    Some(buf) => buf.put(b),
+                    None => self.buf = Some(b),
+                }
+            } else {
+                println!("END");
+                let _: () = try_ready!(self.sink.close());
+                return Ok(Async::Ready(()));
+            }
+
+            // write
+            if let Some(b) = self.buf.take() {
+                match self.sink.start_send(b)? {
+                    AsyncSink::NotReady(b) => {
+                        self.buf = Some(b);
+                    },
+                    AsyncSink::Ready => {
+                        let _: () = try_ready!(self.sink.poll_complete());
+                    },
+                }
+            }
+        }
     }
 }
 
-impl Transfer {
-    pub fn new(socket: TcpStream, serv_socket: TcpStream) -> Self {
-        println!("relay {:?} --> {:?} --> {:?} --> {:?}", socket.local_addr(), socket.peer_addr(), serv_socket.local_addr(), serv_socket.peer_addr());
-
+impl<S: Sink, T: Stream> Transfer<S, T> {
+    pub fn new(sink: S, stream: T) -> Self {
         Self {
-            src: socket,
-            dst: serv_socket,
+            sink,
+            stream,
+
+            buf: None,
         }
     }
 }
@@ -199,14 +242,23 @@ fn main() {
                 let (src_sink, src_stream) = src_frame.split();
                 let (dst_sink, dst_stream) = dst_frame.split();
 
-                //let a = src_stream.forward(dst_sink).map_err(|_| ()).map(|_| ());
-                //let b = dst_stream.forward(src_sink).map_err(|_| ()).map(|_| ());
-                let a = src_stream.forward(dst_sink);
-                let b = dst_stream.forward(src_sink);
+                //let a = src_stream.forward(dst_sink);
+                //let b = dst_stream.forward(src_sink);
 
-                tokio::spawn(a.map_err(|_| ()).and_then(|_| Ok(())));
-                tokio::spawn(b.map_err(|_| ()).and_then(|_| Ok(())));
-                Ok(())
+                //tokio::spawn(a.map_err(|_| ()).and_then(|_| Ok(())));
+                //tokio::spawn(b.map_err(|_| ()).and_then(|_| Ok(())));
+                //Ok(())
+
+                //let src = Arc::new(socket);
+                //let dst = Arc::new(serv_socket);
+                let download = Transfer::new(src_sink, dst_stream);
+                let upload = Transfer::new(dst_sink, src_stream);
+                //let upload = Transfer::new(src.clone(), dst.clone());
+                //let download = Transfer::new(dst.clone(), src.clone());
+                //tokio::spawn(upload.map_err(|e| println!("upload error: {}", e)));
+                //tokio::spawn(download.map_err(|e| println!("upload error: {}", e)));
+
+                upload.join(download).map(|_| ())
             })
             .map_err(|e| println!("Server Error: {}", e));
 
