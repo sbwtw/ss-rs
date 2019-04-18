@@ -11,6 +11,7 @@ use tokio::codec::{Encoder, Decoder, Framed, BytesCodec};
 use bytes::BytesMut;
 use bytes::buf::BufMut;
 use failure::Fail;
+use log::*;
 
 use std::net::{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, Mutex};
@@ -29,6 +30,8 @@ enum HandshakeError {
 }
 
 fn handshake(socket: TcpStream) -> impl Future<Item = TcpStream, Error = failure::Error> {
+    trace!("Handshake {:?}", socket.peer_addr());
+
     // read socks version
     read_exact(socket, [0u8])
         .map_err(|e| e.into())
@@ -107,6 +110,8 @@ fn parse_ip(socket: TcpStream, atyp: u8) -> Box<Future<Item = (TcpStream, IpAddr
 }
 
 fn create_connection(socket: TcpStream) -> impl Future<Item = (TcpStream, TcpStream), Error = failure::Error> {
+    trace!("create_connection {:?}", socket.peer_addr());
+
     read_exact(socket, [0u8; 4])
         .map_err(|e| e.into())
         .and_then(|(socket, buf)| {
@@ -123,7 +128,6 @@ fn create_connection(socket: TcpStream) -> impl Future<Item = (TcpStream, TcpStr
             })
     })
     .and_then(|(socket, addr)| {
-        println!("{:?}", addr);
         TcpStream::connect(&addr)
             .map_err(|e| e.into())
             .and_then(move |serv_socket| Ok((socket, serv_socket)))
@@ -159,7 +163,6 @@ impl<S, T> Future for Transfer<S, T>
                     None => self.buf = Some(b),
                 }
             } else {
-                println!("END");
                 let _: () = try_ready!(self.sink.close());
                 return Ok(Async::Ready(()));
             }
@@ -222,20 +225,32 @@ impl Encoder for BytesForward {
         Ok(())
     }
 }
-
 fn main() {
+    env_logger::builder()
+        .default_format_timestamp(false)
+        .default_format_module_path(false)
+        .init();
+
     let addr: SocketAddr = "127.0.0.1:2000".parse().unwrap();
     let f = TcpListener::bind(&addr)
         .unwrap()
         .incoming()
-        .map_err(|e| println!("Incoming Error: {:?}", e))
+        .map_err(|e| error!("Incoming Error: {:?}", e))
         .for_each(move |socket| {
+
+        let addr = socket.peer_addr();
+        trace!("Incoming from {:?}", addr);
 
         let serv = handshake(socket)
             .and_then(|socket| {
                 create_connection(socket)
             })
             .and_then(|(socket, serv_socket)| {
+                let sl = socket.local_addr();
+                let sp = socket.peer_addr();
+                let dl = serv_socket.local_addr();
+                let dp = serv_socket.peer_addr();
+                info!("Relay {:?} -> {:?} -> {:?} -> {:?}", sl, sp, dl, dp);
 
                 let src_frame = BytesForward::new().framed(socket);
                 let dst_frame = BytesForward::new().framed(serv_socket);
@@ -258,9 +273,11 @@ fn main() {
                 //tokio::spawn(upload.map_err(|e| println!("upload error: {}", e)));
                 //tokio::spawn(download.map_err(|e| println!("upload error: {}", e)));
 
-                upload.join(download).map(|_| ())
+                upload.join(download).map(move |_| {
+                    trace!("Relay END {:?} -> {:?} -> {:?} -> {:?}", sl, sp, dl, dp);
+                })
             })
-            .map_err(|e| println!("Server Error: {}", e));
+            .map_err(move |e| error!("Server Error: {:?} {}", addr, e));
 
         tokio::spawn(serv)
     });
