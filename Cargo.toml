@@ -11,3 +11,5 @@ bytes = "*"
 failure = "*"
 log = "*"
 env_logger = "*"
+ring = "*"
+chacha20-poly1305-aead = { git = "https://github.com/cesarb/chacha20-poly1305-aead" }
