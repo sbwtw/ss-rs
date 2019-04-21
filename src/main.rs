@@ -22,11 +22,13 @@ use std::cell::RefCell;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
+#[derive(Debug)]
 enum Socks5Host {
     Ip(IpAddr),
     Domain(String),
 }
 
+#[derive(Debug)]
 struct Socks5Addr(Socks5Host, u16);
 
 impl Socks5Addr {
@@ -45,10 +47,7 @@ impl Socks5Addr {
             }
         }
 
-        let port: u16 = self.1;
-        bytes.put((port >> 8) as u8);
-        bytes.put((port & 0xff) as u8);
-
+        bytes.put_u16_be(self.1);
         bytes
     }
 }
@@ -78,7 +77,7 @@ fn bytes_to_key(psk: &[u8]) -> Bytes {
         let md5: [u8; 16] = *md5::compute(vkey.clone());
 
         vkey = BytesMut::from(&md5[..]);
-        result.extend(&md5);
+        result.put(&md5[..]);
     }
 
     result.truncate(key_len);
@@ -144,14 +143,16 @@ fn parse_addr(
                 .and_then(|(sock, buf)| Ok((sock, buf[0] as usize)))
                 .and_then(|(sock, len)| read_exact(sock, vec![0u8; len]).map_err(|e| e.into()))
                 .and_then(|(sock, buf)| {
-                    let domain = std::str::from_utf8(&buf[..]).unwrap();
+                    let domain = std::str::from_utf8(&buf[..])?;
+
                     Ok((sock, Socks5Host::Domain(domain.to_string())))
                 }),
         ),
         // Ipv4 Addr
         0x01 => Box::new(read_exact(socket, [0u8; 4]).map_err(|e| e.into()).and_then(
             |(socket, buf)| {
-                let ip = Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]);
+                let ip = Ipv4Addr::from(buf);
+
                 Ok((socket, Socks5Host::Ip(IpAddr::V4(ip))))
             },
         )),
@@ -160,16 +161,8 @@ fn parse_addr(
             read_exact(socket, [0u8; 16])
                 .map_err(|e| e.into())
                 .and_then(|(socket, buf)| {
-                    let a = u16::from_be_bytes([buf[0], buf[1]]);
-                    let b = u16::from_be_bytes([buf[2], buf[3]]);
-                    let c = u16::from_be_bytes([buf[4], buf[5]]);
-                    let d = u16::from_be_bytes([buf[6], buf[7]]);
-                    let e = u16::from_be_bytes([buf[8], buf[9]]);
-                    let f = u16::from_be_bytes([buf[10], buf[11]]);
-                    let g = u16::from_be_bytes([buf[12], buf[13]]);
-                    let h = u16::from_be_bytes([buf[14], buf[15]]);
+                    let ip = Ipv6Addr::from(buf);
 
-                    let ip = Ipv6Addr::new(a, b, c, d, e, f, g, h);
                     Ok((socket, Socks5Host::Ip(IpAddr::V6(ip))))
                 }),
         ),
@@ -283,8 +276,6 @@ impl Decoder for BytesForward {
             return Ok(None);
         }
 
-        //trace!("Decrypter decode: {} {:?}", buf.len(), buf);
-
         let len = buf.len();
         Ok(Some(buf.split_to(len)))
     }
@@ -326,48 +317,35 @@ impl Chacha20Poly1305Codec {
         }
     }
 
-    fn handshake(&mut self, buf: &BytesMut) -> Bytes {
+    fn encrypt(&mut self, buf: &BytesMut) -> Result<Bytes, failure::Error> {
         let payload_len = buf.len() as u16;
         assert!(payload_len < 0x3fff);
+
         let mut len_payload = vec![0u8; 18];
         len_payload[0] = (payload_len >> 8) as u8;
         len_payload[1] = (payload_len & 0xff) as u8;
-        println!("lan_payload: {:x?}", len_payload);
 
         let nonce = self.encrypt_nonce();
-        println!("Enc nonce: {:?}", nonce.as_ref());
         let sealing_key =
             SealingKey::new(&CHACHA20_POLY1305, &self.encrypt_skey[..]).expect("sealing key error");
-        let out_len = seal_in_place(&sealing_key, nonce, Aad::empty(), &mut len_payload, 16)
-            .expect("seal error");
-        println!("Encrypted len_payload: {:x?}", len_payload);
+        let out_len = seal_in_place(&sealing_key, nonce, Aad::empty(), &mut len_payload, 16)?;
 
         let mut payload_encrypted = BytesMut::with_capacity(16 + buf.len());
         payload_encrypted.put(&buf[..]);
         payload_encrypted.put(vec![0u8; 16]);
         let nonce = self.encrypt_nonce();
-        println!("Enc nonce: {:?}", nonce.as_ref());
         let out_len = seal_in_place(
             &sealing_key,
             nonce,
             Aad::empty(),
             &mut payload_encrypted,
             16,
-        )
-        .unwrap();
+        )?;
 
-        println!("Encrypted payload: {:?}", payload_encrypted);
-
-        let mut handshake = BytesMut::new();
-        //handshake.extend(&self.salt);
-        handshake.extend(len_payload);
-        handshake.extend(payload_encrypted);
-        //handshake.extend(encrypted_len);
-        //handshake.extend(&len_tag);
-        //handshake.extend(encrypted_payload);
-        //handshake.extend(&payload_tag);
-
-        handshake.freeze()
+        let mut encrypted = BytesMut::with_capacity(len_payload.len() + payload_encrypted.len());
+        encrypted.extend(len_payload);
+        encrypted.extend(payload_encrypted);
+        Ok(encrypted.freeze())
     }
 
     fn decrypt_nonce(&mut self) -> Nonce {
@@ -412,7 +390,7 @@ impl Decoder for Chacha20Poly1305Codec {
             }
 
             let salt = buf.split_to(32);
-            println!("Got salt: {:x?}", salt);
+            trace!("Got salt: {:x?}", salt);
             let skey = derivate_sub_key(&self.server_config.password.as_bytes()[..], &salt);
             trace!("derivate sub key: {:x?}", skey);
             let opening_key = OpeningKey::new(&CHACHA20_POLY1305, &skey).unwrap();
@@ -432,7 +410,7 @@ impl Decoder for Chacha20Poly1305Codec {
                 let r = open_in_place(open_key, nonce, Aad::empty(), 0, &mut b).unwrap();
                 u16::from_be_bytes([r[0], r[1]]) as usize
             };
-            println!("r = {:?}", payload_len);
+            trace!("Got payload with len = {}", payload_len);
 
             self.waitting_decrypt = Some(payload_len);
         }
@@ -445,11 +423,10 @@ impl Decoder for Chacha20Poly1305Codec {
 
         assert!(buf.len() >= payload_len + 16);
         let mut b = buf.split_to(payload_len + 16);
-        println!("buf: {:x?}", b);
         let nonce = self.decrypt_nonce();
         let open_key = self.decrypt_skey.as_mut().unwrap();
         let r = open_in_place(open_key, nonce, Aad::empty(), 0, &mut b);
-        println!("{:?}", r);
+
         Ok(Some(BytesMut::from(&r.unwrap()[..])))
     }
 }
@@ -460,7 +437,7 @@ impl Encoder for Chacha20Poly1305Codec {
 
     fn encode(&mut self, data: BytesMut, buf: &mut BytesMut) -> Result<(), Self::Error> {
         trace!("Raw Data: {:?}", data);
-        let data = self.handshake(&data);
+        let data = self.encrypt(&data)?;
         trace!("Encrypted Data: {:?}", data);
 
         buf.reserve(data.len());
@@ -518,38 +495,25 @@ fn main() {
                     Ok((src_frame, dst_frame, addr))
                 })
                 .and_then(|(src_frame, mut dst_frame, addr)| {
-                    //let sl = socket.local_addr().unwrap();
-                    //let sp = socket.peer_addr().unwrap();
-                    //let dl = serv_socket.local_addr().unwrap();
-                    //let dp = serv_socket.peer_addr().unwrap();
-                    //info!(
-                    //"Relay {:?}: {:?} -> {:?} -> {:?} -> {:?}",
-                    //addr, sl, sp, dl, dp
-                    //);
+                    let sl = src_frame.get_ref().local_addr().unwrap();
+                    let sp = src_frame.get_ref().peer_addr().unwrap();
+                    let dl = dst_frame.get_ref().local_addr().unwrap();
+                    let dp = dst_frame.get_ref().peer_addr().unwrap();
+                    info!(
+                        "Relay {:?}: {:?} -> {:?} -> {:?} -> {:?}",
+                        addr, sl, sp, dl, dp
+                    );
 
                     dst_frame.start_send(addr.bytes()).unwrap();
 
                     let (src_sink, src_stream) = src_frame.split();
                     let (dst_sink, dst_stream) = dst_frame.split();
 
-                    //let a = src_stream.forward(dst_sink);
-                    //let b = dst_stream.forward(src_sink);
-
-                    //tokio::spawn(a.map_err(|_| ()).and_then(|_| Ok(())));
-                    //tokio::spawn(b.map_err(|_| ()).and_then(|_| Ok(())));
-                    //Ok(())
-
-                    //let src = Arc::new(socket);
-                    //let dst = Arc::new(serv_socket);
                     let download = Transfer::new(src_sink, dst_stream);
                     let upload = Transfer::new(dst_sink, src_stream);
-                    //let upload = Transfer::new(src.clone(), dst.clone());
-                    //let download = Transfer::new(dst.clone(), src.clone());
-                    //tokio::spawn(upload.map_err(|e| println!("upload error: {}", e)));
-                    //tokio::spawn(download.map_err(|e| println!("upload error: {}", e)));
 
                     upload.join(download).map(move |_| {
-                        //trace!("Relay END {:?} -> {:?} -> {:?} -> {:?}", sl, sp, dl, dp);
+                        trace!("Relay END {:?} -> {:?} -> {:?} -> {:?}", sl, sp, dl, dp);
                     })
                 })
                 .map_err(move |e| error!("Server Error: {:?} {}", addr, e));
