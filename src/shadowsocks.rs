@@ -69,7 +69,6 @@ pub struct ShadowsocksReader<R, D> {
     decryptor: D,
     buffer: BytesMut,
     decrypted: BytesMut,
-    //read_buf1: [u8; 1024],
 }
 
 impl<R: AsyncRead, D: ShadowsocksDecryptor> ShadowsocksReader<R, D> {
@@ -77,10 +76,8 @@ impl<R: AsyncRead, D: ShadowsocksDecryptor> ShadowsocksReader<R, D> {
         Self {
             reader,
             decryptor,
-            // TODO: capacity
             buffer: BytesMut::new(),
             decrypted: BytesMut::new(),
-            //read_buf1: [0u8; 1024],
         }
     }
 }
@@ -107,24 +104,23 @@ impl<R: AsyncRead, D: ShadowsocksDecryptor> AsyncRead for ShadowsocksReader<R, D
         let mut buf_used = 0;
 
         loop {
-            // have data to write
-            trace!(
-                "start poll, decrypted len = {}, buf_used = {}, buf_len: {}",
-                self.decrypted.len(),
-                buf_used,
-                buf.len()
-            );
+            //have data to write
+            //trace!(
+            //"start poll, decrypted len = {}, buf_used = {}, buf_len: {}",
+            //self.decrypted.len(),
+            //buf_used,
+            //buf.len()
+            //);
             if self.decrypted.len() != 0 {
                 let ready_len = std::cmp::min(buf.len() - buf_used, self.decrypted.len());
-                trace!("ready len: {}", ready_len);
                 let bytes = self.decrypted.split_to(ready_len);
                 buf[buf_used..(buf_used + ready_len)].copy_from_slice(&bytes);
-                trace!(
-                    "copy finished, buf_used: {}, ready_len: {}, buf_len: {}",
-                    buf_used,
-                    ready_len,
-                    buf.len()
-                );
+                //trace!(
+                //"copy finished, buf_used: {}, ready_len: {}, buf_len: {}",
+                //buf_used,
+                //ready_len,
+                //buf.len()
+                //);
 
                 if (buf_used + ready_len) == buf.len() {
                     // buffer is full, return
@@ -138,19 +134,14 @@ impl<R: AsyncRead, D: ShadowsocksDecryptor> AsyncRead for ShadowsocksReader<R, D
             // read data
             match self.reader.poll_read(&mut read_buf[..])? {
                 Async::Ready(0) => {
-                    trace!("Read EOF");
-                    // EOF
-                    assert!(self.decrypted.len() == 0);
-                    //assert!(buf_used == 0);
-
                     return Ok(Async::Ready(0));
                 }
                 Async::Ready(size) => {
-                    trace!("Read {} bytes", size);
+                    //trace!("Read {} bytes", size);
                     self.buffer.extend(&read_buf[..size]);
                 }
                 Async::NotReady => {
-                    trace!("Read not ready, remain: {}", buf_used);
+                    //trace!("Read not ready, remain: {}", buf_used);
                     if buf_used != 0 {
                         return Ok(Async::Ready(buf_used));
                     }
@@ -158,12 +149,12 @@ impl<R: AsyncRead, D: ShadowsocksDecryptor> AsyncRead for ShadowsocksReader<R, D
                 }
             }
 
-            trace!("After read, buffer len: {}", self.buffer.len());
+            //trace!("After read, buffer len: {}", self.buffer.len());
             while let Some(data) = self.decryptor.decrypt(&mut self.buffer).unwrap() {
                 self.decrypted.extend(data);
-                trace!("got decrypted data: {:?}", self.decrypted);
+                //trace!("got decrypted data: {:?}", self.decrypted);
             }
-            trace!("decrypted finish, total data: {}", self.decrypted.len());
+            //trace!("decrypted finish, total data: {}", self.decrypted.len());
         }
     }
 }
@@ -186,38 +177,16 @@ impl<W: AsyncWrite, E: ShadowsocksEncryptor> AsyncWrite for ShadowsocksWriter<W,
 
         match self.writer.poll_write(&self.encrypted[..])? {
             r @ Async::Ready(0) | r @ Async::NotReady => {
-                trace!("write {:?}", r);
+                //trace!("write {:?}", r);
                 return Ok(r);
             }
             Async::Ready(size) => {
-                trace!("Write {} bytes", size);
+                //trace!("Write {} bytes", size);
                 self.encrypted.split_to(size);
 
                 return Ok(Async::Ready(buf_len));
             }
         }
-
-        //we need more bytes!
-        //if self.buffer.is_empty() {
-        //TODO: Error handling
-        //let encrypted = self.encryptor.encrypt(buf).unwrap();
-        //self.buffer.extend(encrypted);
-        //return Ok(Async::Ready(buf.len()));
-        //}
-
-        //match self.writer.poll_write(&self.buffer[..])? {
-        //Async::Ready(0) => {
-        //trace!("write EOF");
-        //return Ok(Async::Ready(0));
-        //}
-        //Async::Ready(size) => {
-        //self.buffer.split_to(size);
-        //return Ok(Async::Ready(size));
-        //}
-        //Async::NotReady => {
-        //return Ok(Async::NotReady);
-        //}
-        //};
     }
 
     fn shutdown(&mut self) -> Result<Async<()>, io::Error> {

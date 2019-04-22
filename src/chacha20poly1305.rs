@@ -1,24 +1,6 @@
 use bytes::buf::BufMut;
 use bytes::{Bytes, BytesMut};
-use failure::Fail;
-use futures::sink::Sink;
-use futures::try_ready;
-use futures::{Async, Future, Poll};
-use log::*;
-use md5;
 use ring::aead::*;
-use ring::digest::SHA1;
-use ring::hkdf;
-use ring::hmac::SigningKey;
-use tokio::codec::{BytesCodec, Decoder, Encoder, Framed};
-use tokio::io::{read_exact, write_all, ReadHalf, WriteHalf};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::prelude::stream::{SplitSink, SplitStream, Stream};
-use tokio::prelude::*;
-
-use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
 
 use crate::shadowsocks::*;
 use crate::utils::nonce_plus_one;
@@ -69,30 +51,28 @@ impl Chacha20Poly1305Encryptor {
 
 impl ShadowsocksDecryptor for Chacha20Poly1305Decryptor {
     fn decrypt(&mut self, buf: &mut BytesMut) -> Result<Option<Bytes>, failure::Error> {
-        loop {
-            trace!(
-                "undecrypt data: {}, waitting: {:?} {:x?}",
-                buf.len(),
-                self.waitting_payload,
-                buf
-            );
-            let read_length = self.waitting_payload.unwrap_or(2);
+        let tag_size = 16;
 
-            if buf.len() < read_length + 16 {
+        loop {
+            let wanted = self.waitting_payload.unwrap_or(2) + tag_size;
+
+            if buf.len() < wanted {
                 return Ok(None);
             }
 
-            let mut data = buf.split_to(read_length + 16);
+            let mut data = buf.split_to(wanted);
             let nonce = self.nonce();
             let decrypted = open_in_place(&self.decrypt_skey, nonce, Aad::empty(), 0, &mut data)?;
-            trace!("{:x?}", decrypted);
+            assert_eq!(decrypted.len(), wanted - tag_size);
 
             match self.waitting_payload.take() {
                 Some(_) => return Ok(Some(Bytes::from(&decrypted[..]))),
                 None => {
+                    // decrypted is 16bits length of real payload
                     assert!(decrypted.len() == 2);
                     let payload_len = u16::from_be_bytes([decrypted[0], decrypted[1]]) as usize;
-                    trace!("Got payload len info: {}", payload_len);
+
+                    // read real data
                     self.waitting_payload = Some(payload_len);
                 }
             };
@@ -102,7 +82,6 @@ impl ShadowsocksDecryptor for Chacha20Poly1305Decryptor {
 
 impl ShadowsocksEncryptor for Chacha20Poly1305Encryptor {
     fn encrypt(&mut self, data: &[u8]) -> Result<Bytes, failure::Error> {
-        trace!("ready to encrypt data: {:x?}", data);
         let payload_len = data.len() as u16;
         assert!(payload_len < 0x3fff);
 
@@ -111,7 +90,7 @@ impl ShadowsocksEncryptor for Chacha20Poly1305Encryptor {
         len_payload[1] = (payload_len & 0xff) as u8;
 
         let nonce = self.nonce();
-        let out_len = seal_in_place(
+        seal_in_place(
             &self.encrypt_skey,
             nonce,
             Aad::empty(),
@@ -123,7 +102,7 @@ impl ShadowsocksEncryptor for Chacha20Poly1305Encryptor {
         payload_encrypted.put(&data[..]);
         payload_encrypted.put(vec![0u8; 16]);
         let nonce = self.nonce();
-        let out_len = seal_in_place(
+        seal_in_place(
             &self.encrypt_skey,
             nonce,
             Aad::empty(),
@@ -134,7 +113,6 @@ impl ShadowsocksEncryptor for Chacha20Poly1305Encryptor {
         let mut encrypted = BytesMut::with_capacity(len_payload.len() + payload_encrypted.len());
         encrypted.put(len_payload);
         encrypted.put(payload_encrypted);
-        trace!("encrypted data: {:x?}", encrypted);
 
         Ok(encrypted.freeze())
     }
