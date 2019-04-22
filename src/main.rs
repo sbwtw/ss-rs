@@ -2,6 +2,7 @@ use failure::Fail;
 use futures::Future;
 use log::*;
 use ring::aead::*;
+use tokio::codec::{BytesCodec, Decoder};
 use tokio::io::{read_exact, write_all};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::stream::Stream;
@@ -91,41 +92,47 @@ fn remote_establish(
     TcpStream::connect(&config.addr).map_err(Into::into)
 }
 
-fn local_handshake(
-    sock: TcpStream,
-) -> impl Future<Item = (impl AsyncRead, impl AsyncWrite), Error = io::Error> {
+fn local_handshake(sock: TcpStream) -> impl Future<Item = TcpStream, Error = io::Error> {
     // fake data, client won't really use it!
     let buf = vec![0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
 
-    write_all(sock, buf).and_then(|(sock, _)| Ok(sock.split()))
+    write_all(sock, buf).and_then(|(sock, _)| Ok(sock))
 }
 
 fn remote_handshake(
     sock: TcpStream,
     config: Arc<ServerConfig>,
     request_addr: Socks5Addr,
-) -> impl Future<Item = (impl AsyncRead, impl AsyncWrite), Error = io::Error> {
+) -> impl Future<
+    Item = (
+        TcpStream,
+        impl ShadowsocksEncryptor,
+        impl ShadowsocksDecryptor,
+    ),
+    Error = io::Error,
+> {
     // TODO: move to other place
     let salt = Arc::new(*b"01234567890123456789012345678901");
     let encrypt_skey = derivate_sub_key(config.password.as_bytes(), &*salt.clone());
+    trace!("enc salt: {:x?}", salt);
     trace!("enc skey: {:x?}", encrypt_skey);
     // TODO: Error handling
     let sealing_key = SealingKey::new(&CHACHA20_POLY1305, &encrypt_skey[..]).unwrap();
 
     // write salt
     write_all(sock, *salt.clone())
-        .and_then(|(sock, _)| Ok(sock.split()))
-        .and_then(move |(r, w)| {
+        .and_then(move |(sock, _)| {
             // wrap remote writer into secure channel
-            let encryptor = Chacha20Poly1305Encryptor::new(sealing_key);
-            let secure_writer = ShadowsocksWriter::new(w, encryptor);
+            let mut encryptor = Chacha20Poly1305Encryptor::new(sealing_key);
+            let encrypted_addr = encryptor.encrypt(&request_addr.bytes()).unwrap();
+            //let secure_writer = ShadowsocksWriter::new(w, encryptor);
 
             // write request addr in secure channel
-            write_all(secure_writer, request_addr.bytes()).and_then(move |(sw, _)| Ok((r, sw)))
+            write_all(sock, encrypted_addr).and_then(move |(sock, _)| Ok((sock, encryptor)))
         })
-        .and_then(move |(r, sw)| {
-            read_exact(r, [0u8; 32]).and_then(move |(r, salt)| {
-                trace!("Got salt from remote server: {:x?}", salt);
+        .and_then(move |(sock, encryptor)| {
+            read_exact(sock, [0u8; 32]).and_then(move |(sock, salt)| {
+                trace!("dec salt: {:x?}", salt);
 
                 let decrypt_skey = derivate_sub_key(config.password.as_bytes(), &salt);
                 trace!("dec skey: {:x?}", decrypt_skey);
@@ -134,9 +141,8 @@ fn remote_handshake(
 
                 // wrap remote reader into secure channel
                 let decryptor = Chacha20Poly1305Decryptor::new(opening_key);
-                let secure_reader = ShadowsocksReader::new(r, decryptor);
 
-                Ok((secure_reader, sw))
+                Ok((sock, encryptor, decryptor))
             })
         })
 }
@@ -228,24 +234,22 @@ fn main() {
                         let local = local_handshake(local_sock)
                             .map_err(|e| error!("Handshake with local failed: {:?}", e));
 
-                        remote.join(local).and_then(
-                            |((remote_read, remote_write), (local_read, local_write))| {
-                                trace!("Ready to transfer");
-                                let download = tokio::io::copy(remote_read, local_write);
-                                let upload = tokio::io::copy(local_read, remote_write);
+                        local.join(remote).and_then(|(local, (remote, enc, dec))| {
+                            let (rr, rw) = remote.split();
+                            let rsink = ShadowsocksSink::new(rw, enc);
+                            let rstream = ShadowsocksStream::new(rr, dec);
+                            let (lsink, lstream) = BytesCodec::new().framed(local).split();
 
-                                upload
-                                    .join(download)
-                                    .map_err(|e| error!("Transfer error {:?}", e))
-                                    .map(|((upload, _, _), (download, _, _))| {
-                                        info!(
-                                            "Relay finished, upload {} bytes, download {} bytes",
-                                            upload, download
-                                        );
-                                    })
-                            },
-                        )
+                            let upload = lstream.forward(rsink);
+                            let download = rstream.forward(lsink);
+
+                            upload
+                                .join(download)
+                                .map_err(|e| error!("Transfer error: {:?}", e))
+                                .and_then(|_| Ok(()))
+                        })
                     });
+
             tokio::spawn(serv)
         });
 
