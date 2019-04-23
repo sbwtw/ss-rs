@@ -1,3 +1,4 @@
+use clap::{App, Arg, ArgMatches};
 use failure::Fail;
 use futures::Future;
 use log::*;
@@ -9,7 +10,7 @@ use tokio::prelude::stream::Stream;
 use tokio::prelude::*;
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 mod chacha20poly1305;
@@ -86,10 +87,8 @@ fn local_establish(
         })
 }
 
-fn remote_establish(
-    config: Arc<ServerConfig>,
-) -> impl Future<Item = TcpStream, Error = failure::Error> {
-    TcpStream::connect(&config.addr).map_err(Into::into)
+fn remote_establish(config: Arc<Config>) -> impl Future<Item = TcpStream, Error = io::Error> {
+    TcpStream::connect(&config.server_addr)
 }
 
 fn local_handshake(sock: TcpStream) -> impl Future<Item = TcpStream, Error = io::Error> {
@@ -101,7 +100,7 @@ fn local_handshake(sock: TcpStream) -> impl Future<Item = TcpStream, Error = io:
 
 fn remote_handshake(
     sock: TcpStream,
-    config: Arc<ServerConfig>,
+    config: Arc<Config>,
     request_addr: Socks5Addr,
 ) -> impl Future<
     Item = (
@@ -147,58 +146,23 @@ fn remote_handshake(
         })
 }
 
-fn parse_addr(
-    socket: TcpStream,
-    atyp: u8,
-) -> Box<Future<Item = (TcpStream, Socks5Host), Error = failure::Error> + Send> {
-    match atyp {
-        // domain
-        0x03 => Box::new(
-            read_exact(socket, [0u8])
-                .map_err(|e| e.into())
-                .and_then(|(sock, buf)| Ok((sock, buf[0] as usize)))
-                .and_then(|(sock, len)| read_exact(sock, vec![0u8; len]).map_err(|e| e.into()))
-                .and_then(|(sock, buf)| {
-                    let domain = std::str::from_utf8(&buf[..])?;
-
-                    Ok((sock, Socks5Host::Domain(domain.to_string())))
-                }),
-        ),
-        // Ipv4 Addr
-        0x01 => Box::new(read_exact(socket, [0u8; 4]).map_err(|e| e.into()).and_then(
-            |(socket, buf)| {
-                let ip = Ipv4Addr::from(buf);
-
-                Ok((socket, Socks5Host::Ip(IpAddr::V4(ip))))
-            },
-        )),
-        // Ipv6 Addr
-        0x04 => Box::new(
-            read_exact(socket, [0u8; 16])
-                .map_err(|e| e.into())
-                .and_then(|(socket, buf)| {
-                    let ip = Ipv6Addr::from(buf);
-
-                    Ok((socket, Socks5Host::Ip(IpAddr::V6(ip))))
-                }),
-        ),
-        _ => unreachable!(),
-    }
-}
-
-struct ServerConfig {
-    addr: SocketAddr,
+struct Config {
+    server_addr: SocketAddr,
+    listen_addr: SocketAddr,
     password: String,
 }
 
-impl ServerConfig {
-    pub fn new() -> Self {
-        Self {
-            addr: "172.96.230.37:8100".parse().unwrap(),
-            password: "nT9kz6aoxG".to_string(),
-            //addr: "[::]:5001".parse().unwrap(),
-            //password: "123456".to_string(),
-        }
+impl Config {
+    pub fn from_args(args: &ArgMatches) -> Option<Self> {
+        let server_addr = args.value_of("server_addr")?;
+        let listen_addr = args.value_of("listen_addr")?;
+        let password = args.value_of("password")?;
+
+        Some(Self {
+            server_addr: server_addr.parse().ok()?,
+            listen_addr: listen_addr.parse().ok()?,
+            password: password.to_string(),
+        })
     }
 }
 
@@ -208,14 +172,48 @@ fn main() {
         .default_format_module_path(false)
         .init();
 
-    let config = Arc::new(ServerConfig::new());
-    let addr: SocketAddr = "[::]:5002".parse().unwrap();
-    let f = TcpListener::bind(&addr)
+    let matches = App::new("ss-rs")
+        .version("0.1")
+        .author("sbw <sbw@sbw.so>")
+        .about("Shadowsocks")
+        .arg(
+            Arg::with_name("password")
+                .long("pwd")
+                .takes_value(true)
+                .required(true)
+                .help("password"),
+        )
+        .arg(
+            Arg::with_name("server_addr")
+                .long("svr")
+                .takes_value(true)
+                .required(true)
+                .help("server address"),
+        )
+        .arg(
+            Arg::with_name("listen_addr")
+                .long("listen")
+                .takes_value(true)
+                .required(true)
+                .help("local address"),
+        )
+        .arg(
+            Arg::with_name("encrypt_method")
+                .long("cipher")
+                .takes_value(true)
+                .help("encrypt method"),
+        )
+        .get_matches();
+
+    let config = Config::from_args(&matches).unwrap();
+    let config = Arc::new(config);
+
+    let f = TcpListener::bind(&config.listen_addr)
         .unwrap()
         .incoming()
         .map_err(|e| error!("Incoming Error: {:?}", e))
         .for_each(move |socket| {
-            trace!("Incoming from {:?}", addr);
+            trace!("Incoming from {:?}", socket.peer_addr());
 
             let config = config.clone();
             let remote = remote_establish(config.clone())
