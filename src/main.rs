@@ -10,14 +10,16 @@ use tokio::prelude::stream::Stream;
 use tokio::prelude::*;
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 mod chacha20poly1305;
+mod cipher;
 mod shadowsocks;
 mod utils;
 
 use chacha20poly1305::*;
+use cipher::*;
 use shadowsocks::*;
 use utils::*;
 
@@ -98,6 +100,14 @@ fn local_handshake(sock: TcpStream) -> impl Future<Item = TcpStream, Error = io:
     write_all(sock, buf).and_then(|(sock, _)| Ok(sock))
 }
 
+//fn cipher_exchange(
+//sock: TcpStream,
+//config: Arc<Config>,
+//req_addr: Socks5Addr,
+//) -> impl Future<Item = impl Cipher, Error = failure::Error> {
+//unimplemented!()
+//}
+
 fn remote_handshake(
     sock: TcpStream,
     config: Arc<Config>,
@@ -159,8 +169,8 @@ impl Config {
         let password = args.value_of("password")?;
 
         Some(Self {
-            server_addr: server_addr.parse().ok()?,
-            listen_addr: listen_addr.parse().ok()?,
+            server_addr: server_addr.to_socket_addrs().ok()?.next()?,
+            listen_addr: listen_addr.to_socket_addrs().ok()?.next()?,
             password: password.to_string(),
         })
     }
