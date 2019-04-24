@@ -107,6 +107,38 @@ fn local_handshake(sock: TcpStream) -> impl Future<Item = TcpStream, Error = io:
 //) -> impl Future<Item = impl Cipher, Error = failure::Error> {
 //unimplemented!()
 //}
+//
+fn remote_handshake1<C: Cipher>(
+    sock: TcpStream,
+    cipher: mut C,
+    request_addr: Socks5Addr,
+) -> impl Future<
+    Item = (
+        TcpStream,
+        Box<ShadowsocksEncryptor + 'static>,
+        Box<ShadowsocksDecryptor + 'static>,
+    ),
+    Error = io::Error,
+> {
+    let salt = cipher.sealing_iv().clone();
+    let encrypted_addr = cipher.encrypt_data(&request_addr.bytes()).clone();
+
+    // write salt
+    write_all(sock, salt)
+        .and_then(|(sock, _)| {
+            // write request addr in secure channel
+            write_all(sock, encrypted_addr).and_then(|(sock, _)| Ok(sock))
+        })
+        .and_then(move |sock| {
+            read_exact(sock, [0u8; 32]).and_then(move |(sock, salt)| {
+                trace!("dec salt: {:x?}", salt);
+
+                cipher.set_opening_iv(&salt[..]);
+
+                Ok((sock, cipher.take_encryptor(), cipher.take_decryptor()))
+            })
+        })
+}
 
 fn remote_handshake(
     sock: TcpStream,
@@ -156,10 +188,10 @@ fn remote_handshake(
         })
 }
 
-struct Config {
+pub struct Config {
     server_addr: SocketAddr,
     listen_addr: SocketAddr,
-    password: String,
+    pub password: String,
 }
 
 impl Config {
