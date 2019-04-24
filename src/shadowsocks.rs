@@ -55,21 +55,24 @@ pub trait ShadowsocksEncryptor {
     fn encrypt(&mut self, data: &[u8]) -> Result<Bytes, failure::Error>;
 }
 
-pub struct ShadowsocksSink<W, E> {
+pub struct ShadowsocksSink<W> {
     writer: W,
-    encryptor: E,
+    encryptor: Box<dyn ShadowsocksEncryptor + Send>,
     buffered: BytesMut,
     encrypted: BytesMut,
 }
 
-pub struct ShadowsocksStream<R, D> {
+pub struct ShadowsocksStream<R> {
     reader: R,
-    decryptor: D,
+    decryptor: Box<dyn ShadowsocksDecryptor + Send>,
     buffered: BytesMut,
 }
 
-impl<W: AsyncWrite, E: ShadowsocksEncryptor> ShadowsocksSink<W, E> {
-    pub fn new(writer: W, encryptor: E) -> Self {
+impl<W> ShadowsocksSink<W>
+where
+    W: AsyncWrite,
+{
+    pub fn new(writer: W, encryptor: Box<dyn ShadowsocksEncryptor + Send>) -> Self {
         Self {
             writer,
             encryptor,
@@ -79,8 +82,8 @@ impl<W: AsyncWrite, E: ShadowsocksEncryptor> ShadowsocksSink<W, E> {
     }
 }
 
-impl<R: AsyncRead, D: ShadowsocksDecryptor> ShadowsocksStream<R, D> {
-    pub fn new(reader: R, decryptor: D) -> Self {
+impl<R: AsyncRead> ShadowsocksStream<R> {
+    pub fn new(reader: R, decryptor: Box<dyn ShadowsocksDecryptor + Send>) -> Self {
         Self {
             reader,
             decryptor,
@@ -89,10 +92,9 @@ impl<R: AsyncRead, D: ShadowsocksDecryptor> ShadowsocksStream<R, D> {
     }
 }
 
-impl<W, E> Sink for ShadowsocksSink<W, E>
+impl<W> Sink for ShadowsocksSink<W>
 where
     W: AsyncWrite,
-    E: ShadowsocksEncryptor,
 {
     type SinkItem = BytesMut;
     type SinkError = io::Error;
@@ -130,10 +132,9 @@ where
     }
 }
 
-impl<R, D> Stream for ShadowsocksStream<R, D>
+impl<R> Stream for ShadowsocksStream<R>
 where
     R: AsyncRead,
-    D: ShadowsocksDecryptor,
 {
     type Item = Bytes;
     type Error = io::Error;

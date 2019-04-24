@@ -100,92 +100,25 @@ fn local_handshake(sock: TcpStream) -> impl Future<Item = TcpStream, Error = io:
     write_all(sock, buf).and_then(|(sock, _)| Ok(sock))
 }
 
-//fn cipher_exchange(
-//sock: TcpStream,
-//config: Arc<Config>,
-//req_addr: Socks5Addr,
-//) -> impl Future<Item = impl Cipher, Error = failure::Error> {
-//unimplemented!()
-//}
-//
-fn remote_handshake1<C: Cipher>(
+fn remote_handshake<C: Cipher>(
     sock: TcpStream,
-    cipher: mut C,
+    mut cipher: C,
     request_addr: Socks5Addr,
-) -> impl Future<
-    Item = (
-        TcpStream,
-        Box<ShadowsocksEncryptor + 'static>,
-        Box<ShadowsocksDecryptor + 'static>,
-    ),
-    Error = io::Error,
-> {
-    let salt = cipher.sealing_iv().clone();
-    let encrypted_addr = cipher.encrypt_data(&request_addr.bytes()).clone();
+) -> impl Future<Item = (TcpStream, C), Error = io::Error> {
+    let data = cipher.first_sending_block(&request_addr.bytes());
+    let read_len = C::FIRST_REPLY_LENGTH;
 
-    // write salt
-    write_all(sock, salt)
-        .and_then(|(sock, _)| {
-            // write request addr in secure channel
-            write_all(sock, encrypted_addr).and_then(|(sock, _)| Ok(sock))
+    // write handshake data
+    write_all(sock, data).and_then(move |(sock, _)| {
+        // got first reply
+        read_exact(sock, vec![0u8; read_len]).and_then(move |(sock, salt)| {
+            trace!("dec salt: {:x?}", salt);
+
+            cipher.set_opening_iv(&salt[..]);
+
+            Ok((sock, cipher))
         })
-        .and_then(move |sock| {
-            read_exact(sock, [0u8; 32]).and_then(move |(sock, salt)| {
-                trace!("dec salt: {:x?}", salt);
-
-                cipher.set_opening_iv(&salt[..]);
-
-                Ok((sock, cipher.take_encryptor(), cipher.take_decryptor()))
-            })
-        })
-}
-
-fn remote_handshake(
-    sock: TcpStream,
-    config: Arc<Config>,
-    request_addr: Socks5Addr,
-) -> impl Future<
-    Item = (
-        TcpStream,
-        impl ShadowsocksEncryptor,
-        impl ShadowsocksDecryptor,
-    ),
-    Error = io::Error,
-> {
-    // TODO: move to other place
-    let salt = Arc::new(*b"01234567890123456789012345678901");
-    let encrypt_skey = derivate_sub_key(config.password.as_bytes(), &*salt.clone());
-    trace!("enc salt: {:x?}", salt);
-    trace!("enc skey: {:x?}", encrypt_skey);
-    // TODO: Error handling
-    let sealing_key = SealingKey::new(&CHACHA20_POLY1305, &encrypt_skey[..]).unwrap();
-
-    // write salt
-    write_all(sock, *salt.clone())
-        .and_then(move |(sock, _)| {
-            // wrap remote writer into secure channel
-            let mut encryptor = Chacha20Poly1305Encryptor::new(sealing_key);
-            let encrypted_addr = encryptor.encrypt(&request_addr.bytes()).unwrap();
-            //let secure_writer = ShadowsocksWriter::new(w, encryptor);
-
-            // write request addr in secure channel
-            write_all(sock, encrypted_addr).and_then(move |(sock, _)| Ok((sock, encryptor)))
-        })
-        .and_then(move |(sock, encryptor)| {
-            read_exact(sock, [0u8; 32]).and_then(move |(sock, salt)| {
-                trace!("dec salt: {:x?}", salt);
-
-                let decrypt_skey = derivate_sub_key(config.password.as_bytes(), &salt);
-                trace!("dec skey: {:x?}", decrypt_skey);
-                // TODO: Error handling
-                let opening_key = OpeningKey::new(&CHACHA20_POLY1305, &decrypt_skey[..]).unwrap();
-
-                // wrap remote reader into secure channel
-                let decryptor = Chacha20Poly1305Decryptor::new(opening_key);
-
-                Ok((sock, encryptor, decryptor))
-            })
-        })
+    })
 }
 
 pub struct Config {
@@ -269,25 +202,28 @@ fn main() {
                     .and_then(move |(remote_sock, (local_sock, request_addr))| {
                         info!("Relay Connection Established");
 
-                        let remote = remote_handshake(remote_sock, config.clone(), request_addr)
+                        let cipher = Chacha20Poly1305Cipher::new(config.clone());
+                        let remote = remote_handshake(remote_sock, cipher, request_addr)
                             .map_err(|e| error!("Handshake with server failed: {:?}", e));
                         let local = local_handshake(local_sock)
                             .map_err(|e| error!("Handshake with local failed: {:?}", e));
 
-                        local.join(remote).and_then(|(local, (remote, enc, dec))| {
-                            let (rr, rw) = remote.split();
-                            let rsink = ShadowsocksSink::new(rw, enc);
-                            let rstream = ShadowsocksStream::new(rr, dec);
-                            let (lsink, lstream) = BytesCodec::new().framed(local).split();
+                        local
+                            .join(remote)
+                            .and_then(|(local, (remote, mut cipher))| {
+                                let (lsink, lstream) = BytesCodec::new().framed(local).split();
+                                let (rr, rw) = remote.split();
+                                let rsink = ShadowsocksSink::new(rw, cipher.take_encryptor());
+                                let rstream = ShadowsocksStream::new(rr, cipher.take_decryptor());
 
-                            let upload = lstream.forward(rsink);
-                            let download = rstream.forward(lsink);
+                                let upload = lstream.forward(rsink);
+                                let download = rstream.forward(lsink);
 
-                            upload
-                                .join(download)
-                                .map_err(|e| error!("Transfer error: {:?}", e))
-                                .and_then(|_| Ok(()))
-                        })
+                                upload
+                                    .join(download)
+                                    .map_err(|e| error!("Transfer error: {:?}", e))
+                                    .and_then(|_| Ok(()))
+                            })
                     });
 
             tokio::spawn(serv)

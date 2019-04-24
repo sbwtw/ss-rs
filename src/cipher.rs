@@ -15,6 +15,7 @@ use crate::Config;
 pub trait Cipher {
     const KEY_LENGTH: usize;
     const IV_LENGTH: usize;
+    const FIRST_REPLY_LENGTH: usize;
 
     fn bytes_to_key(&self, psk: &[u8]) -> Bytes {
         let iv_len = Self::IV_LENGTH;
@@ -49,13 +50,13 @@ pub trait Cipher {
         skey.freeze()
     }
 
-    fn sealing_iv(&self) -> &Vec<u8>;
+    fn first_sending_block(&mut self, addr: &[u8]) -> Bytes;
     fn set_opening_iv(&mut self, _: &[u8]);
 
     fn encrypt_data(&mut self, _: &[u8]) -> Bytes;
 
-    fn take_encryptor(&mut self) -> Box<ShadowsocksEncryptor>;
-    fn take_decryptor(&mut self) -> Box<ShadowsocksDecryptor>;
+    fn take_encryptor(&mut self) -> Box<dyn ShadowsocksEncryptor + Send>;
+    fn take_decryptor(&mut self) -> Box<dyn ShadowsocksDecryptor + Send>;
 }
 
 pub struct Chacha20Poly1305Cipher {
@@ -94,16 +95,23 @@ impl Chacha20Poly1305Cipher {
 impl Cipher for Chacha20Poly1305Cipher {
     const KEY_LENGTH: usize = 32;
     const IV_LENGTH: usize = 12;
+    const FIRST_REPLY_LENGTH: usize = 32;
 
-    fn take_encryptor(&mut self) -> Box<ShadowsocksEncryptor> {
+    fn take_encryptor(&mut self) -> Box<dyn ShadowsocksEncryptor + Send> {
         Box::new(self.encryptor.take().unwrap())
     }
-    fn take_decryptor(&mut self) -> Box<ShadowsocksDecryptor> {
+    fn take_decryptor(&mut self) -> Box<dyn ShadowsocksDecryptor + Send> {
         Box::new(self.decryptor.take().unwrap())
     }
 
-    fn sealing_iv(&self) -> &Vec<u8> {
-        &self.sealing_salt
+    fn first_sending_block(&mut self, addr: &[u8]) -> Bytes {
+        let encrypted_addr = self.encrypt_data(addr);
+
+        let mut data = BytesMut::new();
+        data.extend(self.sealing_salt.clone());
+        data.extend(encrypted_addr);
+
+        data.freeze()
     }
 
     fn encrypt_data(&mut self, request_addr: &[u8]) -> Bytes {
