@@ -24,25 +24,25 @@ impl Socks5Addr {
         match &self.0 {
             Socks5Host::Ip(ip) => match ip {
                 IpAddr::V4(ipv4) => {
-                    bytes.reserve(1 /* type */ + 4 /* max len of ipv6 */ + 2 /* port */);
-                    bytes.put(b'\x01');
+                    bytes.reserve(1 /* type */ + 4 /* max len of ipv4 */ + 2 /* port */);
+                    bytes.put(b'\x01'); // type for ipv4
                     bytes.put(&ipv4.octets()[..]);
                 }
                 IpAddr::V6(ipv6) => {
                     bytes.reserve(1 /* type */ + 16 /* max len of ipv6 */ + 2 /* port */);
-                    bytes.put(b'\x04');
+                    bytes.put(b'\x04'); // type for ipv6
                     bytes.put(&ipv6.octets()[..]);
                 }
             },
             Socks5Host::Domain(domain) => {
                 bytes.reserve(1 /* type */ + domain.len() + 2 /* port */);
-                bytes.put(b'\x03'); // type
+                bytes.put(b'\x03'); // type for domain
                 bytes.put(domain.len() as u8);
                 bytes.put(domain.as_bytes());
             }
         }
 
-        bytes.put_u16_be(self.1);
+        bytes.put_u16_be(self.1); // write port
         bytes
     }
 }

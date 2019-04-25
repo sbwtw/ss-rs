@@ -2,8 +2,92 @@ use bytes::buf::BufMut;
 use bytes::{Bytes, BytesMut};
 use ring::aead::*;
 
+use std::sync::Arc;
+
+use crate::cipher::*;
 use crate::shadowsocks::*;
 use crate::utils::nonce_plus_one;
+use crate::Config;
+
+pub struct Chacha20Poly1305Cipher {
+    config: Arc<Config>,
+    sealing_salt: Vec<u8>,
+    encryptor: Option<Chacha20Poly1305Encryptor>,
+    decryptor: Option<Chacha20Poly1305Decryptor>,
+}
+
+impl Chacha20Poly1305Cipher {
+    pub fn new(config: Arc<Config>) -> Self {
+        let mut r = Self {
+            config,
+            sealing_salt: b"01234567890123456789012345678901".to_vec(),
+            encryptor: None,
+            decryptor: None,
+        };
+
+        r.generate_encryptor();
+
+        r
+    }
+
+    fn generate_encryptor(&mut self) {
+        let encrypt_skey =
+            self.derivate_sub_key(self.config.password.as_bytes(), &self.sealing_salt[..]);
+        // TODO: Error handling
+        let sealing_key = SealingKey::new(&CHACHA20_POLY1305, &encrypt_skey[..]).unwrap();
+
+        let encryptor = Chacha20Poly1305Encryptor::new(sealing_key);
+
+        self.encryptor = Some(encryptor);
+    }
+}
+
+impl Cipher for Chacha20Poly1305Cipher {
+    fn key_length(&self) -> usize {
+        32
+    }
+    fn iv_length(&self) -> usize {
+        12
+    }
+    fn first_reply_length(&self) -> usize {
+        32
+    }
+
+    fn take_encryptor(&mut self) -> Box<dyn ShadowsocksEncryptor + Send> {
+        Box::new(self.encryptor.take().unwrap())
+    }
+    fn take_decryptor(&mut self) -> Box<dyn ShadowsocksDecryptor + Send> {
+        Box::new(self.decryptor.take().unwrap())
+    }
+
+    fn first_sending_block(&mut self, addr: &[u8]) -> Bytes {
+        let encrypted_addr = self.encrypt_data(addr);
+
+        let mut data = BytesMut::new();
+        data.extend(self.sealing_salt.clone());
+        data.extend(encrypted_addr);
+
+        data.freeze()
+    }
+
+    fn encrypt_data(&mut self, request_addr: &[u8]) -> Bytes {
+        self.encryptor
+            .as_mut()
+            .unwrap()
+            .encrypt(request_addr)
+            .unwrap()
+    }
+
+    fn set_opening_iv(&mut self, iv: &[u8]) {
+        let decrypt_skey = self.derivate_sub_key(self.config.password.as_bytes(), iv);
+        // TODO: Error handling
+        let opening_key = OpeningKey::new(&CHACHA20_POLY1305, &decrypt_skey[..]).unwrap();
+
+        // wrap remote reader into secure channel
+        let decryptor = Chacha20Poly1305Decryptor::new(opening_key);
+        self.decryptor = Some(decryptor);
+    }
+}
 
 pub struct Chacha20Poly1305Encryptor {
     encrypt_skey: SealingKey,

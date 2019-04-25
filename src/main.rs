@@ -2,7 +2,6 @@ use clap::{App, Arg, ArgMatches};
 use failure::Fail;
 use futures::Future;
 use log::*;
-use ring::aead::*;
 use tokio::codec::{BytesCodec, Decoder};
 use tokio::io::{read_exact, write_all};
 use tokio::net::{TcpListener, TcpStream};
@@ -13,6 +12,7 @@ use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
+mod aes256cfb;
 mod chacha20poly1305;
 mod cipher;
 mod shadowsocks;
@@ -100,13 +100,14 @@ fn local_handshake(sock: TcpStream) -> impl Future<Item = TcpStream, Error = io:
     write_all(sock, buf).and_then(|(sock, _)| Ok(sock))
 }
 
-fn remote_handshake<C: Cipher>(
+fn remote_handshake(
     sock: TcpStream,
-    mut cipher: C,
+    mut cipher: CipherWrapper,
     request_addr: Socks5Addr,
-) -> impl Future<Item = (TcpStream, C), Error = io::Error> {
+) -> impl Future<Item = (TcpStream, CipherWrapper), Error = io::Error> {
     let data = cipher.first_sending_block(&request_addr.bytes());
-    let read_len = C::FIRST_REPLY_LENGTH;
+    let read_len = cipher.first_reply_length();
+    trace!("data: {:?}", data);
 
     // write handshake data
     write_all(sock, data).and_then(move |(sock, _)| {
@@ -125,6 +126,7 @@ pub struct Config {
     server_addr: SocketAddr,
     listen_addr: SocketAddr,
     pub password: String,
+    pub method: String,
 }
 
 impl Config {
@@ -132,11 +134,13 @@ impl Config {
         let server_addr = args.value_of("server_addr")?;
         let listen_addr = args.value_of("listen_addr")?;
         let password = args.value_of("password")?;
+        let method = args.value_of("encrypt_method")?;
 
         Some(Self {
             server_addr: server_addr.to_socket_addrs().ok()?.next()?,
             listen_addr: listen_addr.to_socket_addrs().ok()?.next()?,
             password: password.to_string(),
+            method: method.to_string(),
         })
     }
 }
@@ -202,7 +206,7 @@ fn main() {
                     .and_then(move |(remote_sock, (local_sock, request_addr))| {
                         info!("Relay Connection Established");
 
-                        let cipher = Chacha20Poly1305Cipher::new(config.clone());
+                        let cipher = CipherBuilder::new(config.clone()).build();
                         let remote = remote_handshake(remote_sock, cipher, request_addr)
                             .map_err(|e| error!("Handshake with server failed: {:?}", e));
                         let local = local_handshake(local_sock)
