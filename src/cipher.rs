@@ -2,7 +2,6 @@ use bytes::buf::BufMut;
 use bytes::{Bytes, BytesMut};
 use log::*;
 use md5;
-use ring::aead::*;
 use ring::digest::SHA1;
 use ring::hkdf;
 use ring::hmac::SigningKey;

@@ -1,14 +1,11 @@
 use bytes::{Bytes, BytesMut};
 use log::*;
-use openssl::symm::{decrypt, encrypt, Cipher, Crypter, Mode};
-use ring::aead::*;
+use openssl::symm::{Cipher, Crypter, Mode};
 
 use std::sync::Arc;
 
 use crate::cipher::Cipher as ShadowsocksCipher;
-use crate::cipher::*;
 use crate::shadowsocks::*;
-use crate::utils::nonce_plus_one;
 use crate::Config;
 
 pub struct Aes256CfbCipher {

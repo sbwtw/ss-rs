@@ -5,17 +5,31 @@ use futures::try_ready;
 use futures::Async;
 use tokio::prelude::*;
 
+use std::fmt::{self, Formatter};
 use std::io;
 use std::net::IpAddr;
 
-#[derive(Debug)]
 pub enum Socks5Host {
     Ip(IpAddr),
     Domain(String),
 }
 
-#[derive(Debug)]
 pub struct Socks5Addr(pub Socks5Host, pub u16);
+
+impl fmt::Display for Socks5Host {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            Socks5Host::Ip(ip) => write!(f, "{}", ip),
+            Socks5Host::Domain(domain) => write!(f, "{}", domain),
+        }
+    }
+}
+
+impl fmt::Display for Socks5Addr {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "{}:{}", self.0, self.1)
+    }
+}
 
 impl Socks5Addr {
     pub fn bytes(&self) -> BytesMut {

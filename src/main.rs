@@ -8,6 +8,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::stream::Stream;
 use tokio::prelude::*;
 
+use std::fs::File;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
@@ -15,11 +16,12 @@ use std::sync::Arc;
 mod aes256cfb;
 mod chacha20poly1305;
 mod cipher;
+mod config;
 mod shadowsocks;
 mod utils;
 
-use chacha20poly1305::*;
 use cipher::*;
+use config::*;
 use shadowsocks::*;
 use utils::*;
 
@@ -37,8 +39,6 @@ enum HandshakeError {
 fn local_establish(
     sock: TcpStream,
 ) -> impl Future<Item = (TcpStream, Socks5Addr), Error = failure::Error> {
-    trace!("Establish connection for {:?}", sock.peer_addr());
-
     // read socks version
     read_exact(sock, [0u8])
         .map_err(Into::into)
@@ -90,7 +90,11 @@ fn local_establish(
 }
 
 fn remote_establish(config: Arc<Config>) -> impl Future<Item = TcpStream, Error = io::Error> {
-    TcpStream::connect(&config.server_addr)
+    TcpStream::connect(&config.server_addr).and_then(|sock| {
+        sock.set_nodelay(true)?;
+
+        Ok(sock)
+    })
 }
 
 fn local_handshake(sock: TcpStream) -> impl Future<Item = TcpStream, Error = io::Error> {
@@ -107,13 +111,13 @@ fn remote_handshake(
 ) -> impl Future<Item = (TcpStream, CipherWrapper), Error = io::Error> {
     let data = cipher.first_sending_block(&request_addr.bytes());
     let read_len = cipher.first_reply_length();
-    trace!("data: {:?}", data);
+    trace!("first-block: {:?}", data);
 
     // write handshake data
     write_all(sock, data).and_then(move |(sock, _)| {
         // got first reply
         read_exact(sock, vec![0u8; read_len]).and_then(move |(sock, salt)| {
-            trace!("dec salt: {:x?}", salt);
+            trace!("recv-block: {:x?}", salt);
 
             cipher.set_opening_iv(&salt[..]);
 
@@ -154,7 +158,7 @@ fn main() {
     let matches = App::new("ss-rs")
         .version("0.1")
         .author("sbw <sbw@sbw.so>")
-        .about("Shadowsocks")
+        .about("Keep your connection secure!")
         .arg(
             Arg::with_name("password")
                 .long("pwd")
@@ -184,6 +188,12 @@ fn main() {
         )
         .get_matches();
 
+    let mut f = File::open("config.toml").unwrap();
+    let mut s = String::new();
+    f.read_to_string(&mut s).unwrap();
+    let c: ClientConfig = toml::from_str(&s).unwrap();
+    println!("{:#?}", c);
+
     let config = Config::from_args(&matches).unwrap();
     let config = Arc::new(config);
 
@@ -193,6 +203,8 @@ fn main() {
         .map_err(|e| error!("Incoming Error: {:?}", e))
         .for_each(move |socket| {
             trace!("Incoming from {:?}", socket.peer_addr());
+
+            socket.set_nodelay(true).unwrap();
 
             let config = config.clone();
             let remote = remote_establish(config.clone())
@@ -204,7 +216,9 @@ fn main() {
                 remote
                     .join(local)
                     .and_then(move |(remote_sock, (local_sock, request_addr))| {
-                        info!("Relay Connection Established");
+                        let rpeer = remote_sock.peer_addr().unwrap();
+                        let lpeer = local_sock.peer_addr().unwrap();
+                        info!("Relay {} in {} -> {}", request_addr, lpeer, rpeer);
 
                         let cipher = CipherBuilder::new(config.clone()).build();
                         let remote = remote_handshake(remote_sock, cipher, request_addr)
@@ -214,7 +228,7 @@ fn main() {
 
                         local
                             .join(remote)
-                            .and_then(|(local, (remote, mut cipher))| {
+                            .and_then(move |(local, (remote, mut cipher))| {
                                 let (lsink, lstream) = BytesCodec::new().framed(local).split();
                                 let (rr, rw) = remote.split();
                                 let rsink = ShadowsocksSink::new(rw, cipher.take_encryptor());
@@ -226,7 +240,10 @@ fn main() {
                                 upload
                                     .join(download)
                                     .map_err(|e| error!("Transfer error: {:?}", e))
-                                    .and_then(|_| Ok(()))
+                                    .and_then(move |_| {
+                                        info!("Relay END for {:?} -> {:?}", lpeer, rpeer);
+                                        Ok(())
+                                    })
                             })
                     });
 

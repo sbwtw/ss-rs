@@ -1,9 +1,3 @@
-use bytes::buf::BufMut;
-use bytes::{Bytes, BytesMut};
-use md5;
-use ring::digest::SHA1;
-use ring::hkdf;
-use ring::hmac::SigningKey;
 use tokio::io::read_exact;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
