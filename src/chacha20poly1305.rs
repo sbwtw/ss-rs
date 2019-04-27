@@ -1,5 +1,6 @@
 use bytes::buf::BufMut;
 use bytes::{Bytes, BytesMut};
+use rand::{thread_rng, Rng};
 use ring::aead::*;
 
 use std::sync::Arc;
@@ -11,16 +12,20 @@ use crate::utils::nonce_plus_one;
 
 pub struct Chacha20Poly1305Cipher {
     config: Arc<ServerConfig>,
-    sealing_salt: Vec<u8>,
+    sealing_salt: [u8; 32],
     encryptor: Option<Chacha20Poly1305Encryptor>,
     decryptor: Option<Chacha20Poly1305Decryptor>,
 }
 
 impl Chacha20Poly1305Cipher {
     pub fn new(config: Arc<ServerConfig>) -> Self {
+        let mut rng = thread_rng();
+        let mut sealing_salt = [0; 32];
+        rng.fill(&mut sealing_salt);
+
         let mut r = Self {
             config,
-            sealing_salt: b"01234567890123456789012345678901".to_vec(),
+            sealing_salt,
             encryptor: None,
             decryptor: None,
         };
@@ -64,7 +69,7 @@ impl Cipher for Chacha20Poly1305Cipher {
         let encrypted_addr = self.encrypt_data(addr);
 
         let mut data = BytesMut::new();
-        data.extend(self.sealing_salt.clone());
+        data.extend(&self.sealing_salt[..]);
         data.extend(encrypted_addr);
 
         data.freeze()

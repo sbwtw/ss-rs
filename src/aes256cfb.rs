@@ -1,6 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use log::*;
 use openssl::symm::{Cipher, Crypter, Mode};
+use rand::{thread_rng, Rng};
 
 use std::sync::Arc;
 
@@ -18,7 +19,9 @@ pub struct Aes256CfbCipher {
 
 impl Aes256CfbCipher {
     pub fn new(config: Arc<ServerConfig>) -> Self {
-        let encrypt_iv = *b"0123456789012345";
+        let mut rng = thread_rng();
+        let mut encrypt_iv = [0; 16];
+        rng.fill(&mut encrypt_iv);
 
         let mut r = Self {
             config,
