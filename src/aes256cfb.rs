@@ -5,11 +5,11 @@ use openssl::symm::{Cipher, Crypter, Mode};
 use std::sync::Arc;
 
 use crate::cipher::Cipher as ShadowsocksCipher;
+use crate::config::*;
 use crate::shadowsocks::*;
-use crate::Config;
 
 pub struct Aes256CfbCipher {
-    config: Arc<Config>,
+    config: Arc<ServerConfig>,
     skey: [u8; 32],
     encrypt_iv: [u8; 16],
     decrypt_iv: [u8; 16],
@@ -17,7 +17,7 @@ pub struct Aes256CfbCipher {
 }
 
 impl Aes256CfbCipher {
-    pub fn new(config: Arc<Config>) -> Self {
+    pub fn new(config: Arc<ServerConfig>) -> Self {
         let encrypt_iv = *b"0123456789012345";
 
         let mut r = Self {
@@ -34,7 +34,7 @@ impl Aes256CfbCipher {
     }
 
     fn initialize(&mut self) {
-        let skey = self.bytes_to_key(self.config.password.as_bytes());
+        let skey = self.bytes_to_key(self.config.password().as_bytes());
         self.skey.copy_from_slice(&skey[..]);
 
         let cipher = Cipher::aes_256_cfb128();

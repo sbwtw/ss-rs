@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use crate::aes256cfb::*;
 use crate::chacha20poly1305::*;
+use crate::config::*;
 use crate::shadowsocks::*;
-use crate::Config;
 
 pub trait Cipher {
     fn key_length(&self) -> usize;
@@ -62,7 +62,7 @@ pub trait Cipher {
 }
 
 pub struct CipherBuilder {
-    config: Arc<Config>,
+    config: Arc<ServerConfig>,
 }
 
 pub struct CipherWrapper {
@@ -100,12 +100,12 @@ impl Cipher for CipherWrapper {
 }
 
 impl CipherBuilder {
-    pub fn new(config: Arc<Config>) -> Self {
+    pub fn new(config: Arc<ServerConfig>) -> Self {
         Self { config }
     }
 
     pub fn build(self) -> CipherWrapper {
-        match self.config.method.as_ref() {
+        match self.config.encrypt_method().as_ref() {
             "chacha20-ietf-poly1305" => CipherWrapper {
                 inner: Box::new(Chacha20Poly1305Cipher::new(self.config)),
             },

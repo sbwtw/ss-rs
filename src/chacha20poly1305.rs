@@ -5,19 +5,19 @@ use ring::aead::*;
 use std::sync::Arc;
 
 use crate::cipher::*;
+use crate::config::*;
 use crate::shadowsocks::*;
 use crate::utils::nonce_plus_one;
-use crate::Config;
 
 pub struct Chacha20Poly1305Cipher {
-    config: Arc<Config>,
+    config: Arc<ServerConfig>,
     sealing_salt: Vec<u8>,
     encryptor: Option<Chacha20Poly1305Encryptor>,
     decryptor: Option<Chacha20Poly1305Decryptor>,
 }
 
 impl Chacha20Poly1305Cipher {
-    pub fn new(config: Arc<Config>) -> Self {
+    pub fn new(config: Arc<ServerConfig>) -> Self {
         let mut r = Self {
             config,
             sealing_salt: b"01234567890123456789012345678901".to_vec(),
@@ -32,7 +32,7 @@ impl Chacha20Poly1305Cipher {
 
     fn generate_encryptor(&mut self) {
         let encrypt_skey =
-            self.derivate_sub_key(self.config.password.as_bytes(), &self.sealing_salt[..]);
+            self.derivate_sub_key(self.config.password().as_bytes(), &self.sealing_salt[..]);
         // TODO: Error handling
         let sealing_key = SealingKey::new(&CHACHA20_POLY1305, &encrypt_skey[..]).unwrap();
 
@@ -79,7 +79,7 @@ impl Cipher for Chacha20Poly1305Cipher {
     }
 
     fn set_opening_iv(&mut self, iv: &[u8]) {
-        let decrypt_skey = self.derivate_sub_key(self.config.password.as_bytes(), iv);
+        let decrypt_skey = self.derivate_sub_key(self.config.password().as_bytes(), iv);
         // TODO: Error handling
         let opening_key = OpeningKey::new(&CHACHA20_POLY1305, &decrypt_skey[..]).unwrap();
 

@@ -1,4 +1,4 @@
-use clap::{App, Arg, ArgMatches};
+use clap::{App, Arg};
 use failure::Fail;
 use futures::Future;
 use log::*;
@@ -10,7 +10,6 @@ use tokio::prelude::*;
 
 use std::fs::File;
 use std::io;
-use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 mod aes256cfb;
@@ -89,8 +88,8 @@ fn local_establish(
         })
 }
 
-fn remote_establish(config: Arc<Config>) -> impl Future<Item = TcpStream, Error = io::Error> {
-    TcpStream::connect(&config.server_addr).and_then(|sock| {
+fn remote_establish(config: ServerConfig) -> impl Future<Item = TcpStream, Error = io::Error> {
+    TcpStream::connect(config.addr()).and_then(|sock| {
         sock.set_nodelay(true)?;
 
         Ok(sock)
@@ -126,30 +125,7 @@ fn remote_handshake(
     })
 }
 
-pub struct Config {
-    server_addr: SocketAddr,
-    listen_addr: SocketAddr,
-    pub password: String,
-    pub method: String,
-}
-
-impl Config {
-    pub fn from_args(args: &ArgMatches) -> Option<Self> {
-        let server_addr = args.value_of("server_addr")?;
-        let listen_addr = args.value_of("listen_addr")?;
-        let password = args.value_of("password")?;
-        let method = args.value_of("encrypt_method")?;
-
-        Some(Self {
-            server_addr: server_addr.to_socket_addrs().ok()?.next()?,
-            listen_addr: listen_addr.to_socket_addrs().ok()?.next()?,
-            password: password.to_string(),
-            method: method.to_string(),
-        })
-    }
-}
-
-fn main() {
+fn main() -> Result<(), failure::Error> {
     env_logger::builder()
         .default_format_timestamp(false)
         .default_format_module_path(false)
@@ -160,44 +136,21 @@ fn main() {
         .author("sbw <sbw@sbw.so>")
         .about("Keep your connection secure!")
         .arg(
-            Arg::with_name("password")
-                .long("pwd")
+            Arg::with_name("config")
+                .long("--config")
+                .short("-c")
+                .value_name("FILE")
                 .takes_value(true)
-                .required(true)
-                .help("password"),
-        )
-        .arg(
-            Arg::with_name("server_addr")
-                .long("svr")
-                .takes_value(true)
-                .required(true)
-                .help("server address"),
-        )
-        .arg(
-            Arg::with_name("listen_addr")
-                .long("listen")
-                .takes_value(true)
-                .required(true)
-                .help("local address"),
-        )
-        .arg(
-            Arg::with_name("encrypt_method")
-                .long("cipher")
-                .takes_value(true)
-                .help("encrypt method"),
+                .help("Configuration file"),
         )
         .get_matches();
 
-    let mut f = File::open("config.toml").unwrap();
-    let mut s = String::new();
-    f.read_to_string(&mut s).unwrap();
-    let c: ClientConfig = toml::from_str(&s).unwrap();
-    println!("{:#?}", c);
-
-    let config = Config::from_args(&matches).unwrap();
+    let config_file = matches.value_of("config").unwrap();
+    let config = ClientConfig::from_file(&mut File::open(config_file)?)?;
     let config = Arc::new(config);
 
-    let f = TcpListener::bind(&config.listen_addr)
+    info!("ss-rs client listening on: {}", config.bind_addr());
+    let f = TcpListener::bind(config.bind_addr())
         .unwrap()
         .incoming()
         .map_err(|e| error!("Incoming Error: {:?}", e))
@@ -207,7 +160,8 @@ fn main() {
             socket.set_nodelay(true).unwrap();
 
             let config = config.clone();
-            let remote = remote_establish(config.clone())
+            let server = Arc::new(config.server_list()[0].clone());
+            let remote = remote_establish(config.server_list()[0].clone())
                 .map_err(|e| error!("Establish connection to server failed: {:?}", e));
             let local = local_establish(socket)
                 .map_err(|e| error!("Establish connection from local failed: {:?}", e));
@@ -220,7 +174,7 @@ fn main() {
                         let lpeer = local_sock.peer_addr().unwrap();
                         info!("Relay {} in {} -> {}", request_addr, lpeer, rpeer);
 
-                        let cipher = CipherBuilder::new(config.clone()).build();
+                        let cipher = CipherBuilder::new(server).build();
                         let remote = remote_handshake(remote_sock, cipher, request_addr)
                             .map_err(|e| error!("Handshake with server failed: {:?}", e));
                         let local = local_handshake(local_sock)
@@ -250,5 +204,5 @@ fn main() {
             tokio::spawn(serv)
         });
 
-    tokio::run(f);
+    Ok(tokio::run(f))
 }

@@ -1,8 +1,0 @@
-
-bind_addr = "[::]:5002"
-
-[[server]]
-password = "nT9kz6aoxG"
-server_addr = "172.96.230.37:8100"
-encrypt_method = "chacha20-ietf-poly1305"
-
