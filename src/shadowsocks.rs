@@ -49,7 +49,9 @@ impl Socks5Addr {
                 }
             },
             Socks5Host::Domain(domain) => {
-                bytes.reserve(1 /* type */ + domain.len() + 2 /* port */);
+                bytes.reserve(
+                    1 /* type */ + 1 /* domain len */ + domain.len() + 2, /* port */
+                );
                 bytes.put(b'\x03'); // type for domain
                 bytes.put(domain.len() as u8);
                 bytes.put(domain.as_bytes());
