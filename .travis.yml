@@ -9,6 +9,8 @@ rust:
 
 cache:
     - cargo
+before_cache:
+    - cargo clean -p ss-rs
 
 script:
     - cargo build --release
