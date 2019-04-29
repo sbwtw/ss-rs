@@ -68,7 +68,7 @@ pub trait ShadowsocksDecryptor {
 }
 
 pub trait ShadowsocksEncryptor {
-    fn encrypt(&mut self, data: &[u8]) -> Result<Bytes, failure::Error>;
+    fn encrypt(&mut self, data: &mut BytesMut) -> Result<Bytes, failure::Error>;
 }
 
 pub struct ShadowsocksSink<W> {
@@ -127,9 +127,8 @@ where
 
     fn poll_complete(&mut self) -> Result<Async<()>, Self::SinkError> {
         if !self.buffered.is_empty() {
-            let encrypted_data = self.encryptor.encrypt(&self.buffered).unwrap();
+            let encrypted_data = self.encryptor.encrypt(&mut self.buffered).unwrap();
             self.encrypted.extend(encrypted_data);
-            self.buffered.clear();
         }
 
         match self.writer.poll_write(&self.encrypted[..])? {

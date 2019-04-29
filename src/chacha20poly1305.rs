@@ -79,7 +79,7 @@ impl Cipher for Chacha20Poly1305Cipher {
         self.encryptor
             .as_mut()
             .unwrap()
-            .encrypt(request_addr)
+            .encrypt(&mut BytesMut::from(request_addr))
             .unwrap()
     }
 
@@ -170,10 +170,14 @@ impl ShadowsocksDecryptor for Chacha20Poly1305Decryptor {
 }
 
 impl ShadowsocksEncryptor for Chacha20Poly1305Encryptor {
-    fn encrypt(&mut self, data: &[u8]) -> Result<Bytes, failure::Error> {
-        let payload_len = data.len() as u16;
-        assert!(payload_len < 0x3fff);
+    fn encrypt(&mut self, data: &mut BytesMut) -> Result<Bytes, failure::Error> {
+        let data = if data.len() >= 0x3fff {
+            data.split_to(0x3fff)
+        } else {
+            data.take()
+        };
 
+        let payload_len = data.len() as u16;
         let mut len_payload = vec![0u8; 18];
         len_payload[0] = (payload_len >> 8) as u8;
         len_payload[1] = (payload_len & 0xff) as u8;

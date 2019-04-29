@@ -136,10 +136,10 @@ impl ShadowsocksDecryptor for Aes256CfbDecryptor {
 }
 
 impl ShadowsocksEncryptor for Aes256CfbEncryptor {
-    fn encrypt(&mut self, data: &[u8]) -> Result<Bytes, failure::Error> {
+    fn encrypt(&mut self, data: &mut BytesMut) -> Result<Bytes, failure::Error> {
         let buffer_size = data.len() + 1; // 1 for block size
         let mut buffer = vec![0; buffer_size];
-        let size = self.encrypter.update(data, &mut buffer)?;
+        let size = self.encrypter.update(&data.take()[..], &mut buffer)?;
 
         Ok(BytesMut::from(&buffer[..size]).freeze())
     }
