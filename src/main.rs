@@ -12,6 +12,7 @@ use tokio::prelude::*;
 use std::fs::File;
 use std::io;
 use std::sync::Arc;
+use std::time;
 
 mod aes256cfb;
 mod chacha20poly1305;
@@ -89,21 +90,47 @@ fn local_establish(
         })
 }
 
+fn try_server(
+    config: Arc<ServerConfig>,
+    addr: &[u8],
+) -> impl Future<Item = (TcpStream, CipherWrapper), Error = io::Error> {
+    let mut cipher = CipherBuilder::new(config.clone()).build();
+    let data = cipher.first_sending_block(addr);
+    let read_len = cipher.first_reply_length();
+
+    let timeout = time::Duration::from_secs(3);
+
+    TcpStream::connect(config.addr())
+        .and_then(move |sock| {
+            // write handshake data
+            write_all(sock, data).and_then(move |(sock, _)| {
+                // got first reply
+                read_exact(sock, vec![0u8; read_len]).and_then(move |(sock, salt)| {
+                    trace!("recv-block: {:x?}", salt);
+
+                    cipher.set_opening_iv(&salt[..]);
+
+                    Ok((sock, cipher))
+                })
+            })
+        })
+        .timeout(timeout)
+        .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e.to_string()))
+}
+
 fn server_pick(
     servers: &Vec<ServerConfig>,
-) -> impl Future<Item = (TcpStream, ServerConfig), Error = io::Error> {
+    addr: &[u8],
+) -> impl Future<Item = (TcpStream, CipherWrapper), Error = io::Error> {
     let iter = servers.iter().map(|config| {
-        let c = config.clone();
-        TcpStream::connect(config.addr()).and_then(move |sock| {
-            sock.set_nodelay(true)?;
+        let c = Arc::new(config.clone());
 
-            Ok((sock, c))
-        })
+        try_server(c, addr)
     });
 
     future::select_all(iter)
         .map_err(|(e, _, _)| e)
-        .map(|((sock, config), _, _)| (sock, config))
+        .map(|((sock, cipher), _, _)| (sock, cipher))
 }
 
 fn local_handshake(sock: TcpStream) -> impl Future<Item = TcpStream, Error = io::Error> {
@@ -111,28 +138,6 @@ fn local_handshake(sock: TcpStream) -> impl Future<Item = TcpStream, Error = io:
     let buf = vec![0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
 
     write_all(sock, buf).and_then(|(sock, _)| Ok(sock))
-}
-
-fn remote_handshake(
-    sock: TcpStream,
-    mut cipher: CipherWrapper,
-    request_addr: Socks5Addr,
-) -> impl Future<Item = (TcpStream, CipherWrapper), Error = io::Error> {
-    let data = cipher.first_sending_block(&request_addr.bytes());
-    let read_len = cipher.first_reply_length();
-    trace!("first-block: {:?}", data);
-
-    // write handshake data
-    write_all(sock, data).and_then(move |(sock, _)| {
-        // got first reply
-        read_exact(sock, vec![0u8; read_len]).and_then(move |(sock, salt)| {
-            trace!("recv-block: {:x?}", salt);
-
-            cipher.set_opening_iv(&salt[..]);
-
-            Ok((sock, cipher))
-        })
-    })
 }
 
 fn main() -> Result<(), failure::Error> {
@@ -170,44 +175,37 @@ fn main() -> Result<(), failure::Error> {
             socket.set_nodelay(true).unwrap();
 
             let config = config.clone();
-            let remote = server_pick(config.server_list())
-                .map_err(|e| error!("Establish connection to server failed: {:?}", e));
-            let local = local_establish(socket)
-                .map_err(|e| error!("Establish connection from local failed: {:?}", e));
-
-            let serv = remote.join(local).and_then(
-                move |((remote_sock, config), (local_sock, request_addr))| {
-                    let rpeer = remote_sock.peer_addr().unwrap();
-                    let lpeer = local_sock.peer_addr().unwrap();
-                    info!("Relay {} in {} -> {}", request_addr, lpeer, rpeer);
-
-                    let cipher = CipherBuilder::new(Arc::new(config)).build();
-                    let remote = remote_handshake(remote_sock, cipher, request_addr)
-                        .map_err(|e| error!("Handshake with server failed: {}", e));
+            let serv = local_establish(socket)
+                .map_err(|e| error!("Establish connection from local failed: {}", e))
+                .and_then(move |(local_sock, req_addr)| {
                     let local = local_handshake(local_sock)
-                        .map_err(|e| error!("Handshake with local failed: {}", e));
+                        .map_err(|e| error!("Local handshake error: {}", e));
+                    let server = server_pick(config.server_list(), &req_addr.bytes())
+                        .map_err(|e| error!("Pick server error: {}", e));
 
-                    local
-                        .join(remote)
-                        .and_then(move |(local, (remote, mut cipher))| {
-                            let (lsink, lstream) = BytesCodec::new().framed(local).split();
-                            let (rr, rw) = remote.split();
-                            let rsink = ShadowsocksSink::new(rw, cipher.take_encryptor());
-                            let rstream = ShadowsocksStream::new(rr, cipher.take_decryptor());
+                    local.join(server)
+                })
+                .and_then(|(local, (remote, mut cipher))| {
+                    let lpeer = local.peer_addr().unwrap();
+                    let rpeer = remote.peer_addr().unwrap();
+                    info!("Relay {} -> {}", lpeer, rpeer);
 
-                            let upload = lstream.forward(rsink);
-                            let download = rstream.forward(lsink);
+                    let (lsink, lstream) = BytesCodec::new().framed(local).split();
+                    let (rr, rw) = remote.split();
+                    let rsink = ShadowsocksSink::new(rw, cipher.take_encryptor());
+                    let rstream = ShadowsocksStream::new(rr, cipher.take_decryptor());
 
-                            upload
-                                .join(download)
-                                .map_err(|e| error!("Transfer error: {}", e))
-                                .and_then(move |_| {
-                                    info!("Relay END for {} -> {}", lpeer, rpeer);
-                                    Ok(())
-                                })
+                    let upload = lstream.forward(rsink);
+                    let download = rstream.forward(lsink);
+
+                    upload
+                        .join(download)
+                        .map_err(|e| error!("Transfer error: {}", e))
+                        .and_then(move |_| {
+                            info!("Relay END for {} -> {}", lpeer, rpeer);
+                            Ok(())
                         })
-                },
-            );
+                });
 
             tokio::spawn(serv)
         });
