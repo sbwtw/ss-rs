@@ -1,15 +1,15 @@
 
 # Local bind address
-bind_addr = "localhost:1080"
+bind_addr = "[::]:1080"
 
 # Server 1 settings
 [[server]]
 password = "your_server_pass"
-server_addr = "example.com:2000"
+server_addr = "1.2.3.4:2000"
 encrypt_method = "chacha20-ietf-poly1305"
 
 # Server 2 settings
 [[server]]
 password = "your_server_pass"
-server_addr = "example.com:2001"
+server_addr = "2.3.4.5:2001"
 encrypt_method = "aes-256-cfb"
