@@ -1,4 +1,4 @@
-# ss-rs
+# ss-rs [![Build Status](https://travis-ci.org/sbwtw/ss-rs.svg)](https://travis-ci.org/sbwtw/ss-rs) [![Build Status](https://ci.appveyor.com/api/projects/status/github/sbwtw/ss-rs?svg=true)](https://ci.appveyor.com/project/sbwtw/ss-rs)
 Shadowsocks client implements in Rust.
 
 ## Usage
