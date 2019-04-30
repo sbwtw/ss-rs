@@ -144,6 +144,7 @@ fn main() -> Result<(), failure::Error> {
     env_logger::builder()
         .default_format_timestamp(false)
         .default_format_module_path(false)
+        .filter_level(LevelFilter::Info)
         .init();
 
     let matches = App::new("ss-rs")
@@ -183,12 +184,14 @@ fn main() -> Result<(), failure::Error> {
                     let server = server_pick(config.server_list(), &req_addr.bytes())
                         .map_err(|e| error!("Pick server error: {}", e));
 
-                    local.join(server)
+                    local.join(server).and_then(|(local, (remote, cipher))| {
+                        Ok(((local, req_addr), (remote, cipher)))
+                    })
                 })
-                .and_then(|(local, (remote, mut cipher))| {
+                .and_then(|((local, req_addr), (remote, mut cipher))| {
                     let lpeer = local.peer_addr().unwrap();
                     let rpeer = remote.peer_addr().unwrap();
-                    info!("Relay {} -> {}", lpeer, rpeer);
+                    info!("Relay {}: {} -> {}", req_addr, lpeer, rpeer);
 
                     let (lsink, lstream) = BytesCodec::new().framed(local).split();
                     let (rr, rw) = remote.split();
@@ -202,7 +205,7 @@ fn main() -> Result<(), failure::Error> {
                         .join(download)
                         .map_err(|e| error!("Transfer error: {}", e))
                         .and_then(move |_| {
-                            info!("Relay END for {} -> {}", lpeer, rpeer);
+                            info!("Relay END for {}: {} -> {}", req_addr, lpeer, rpeer);
                             Ok(())
                         })
                 });
