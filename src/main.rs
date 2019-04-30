@@ -1,4 +1,4 @@
-use clap::{App, Arg};
+use clap::{App, Arg, ArgGroup};
 use failure::Fail;
 use futures::future;
 use futures::Future;
@@ -140,33 +140,14 @@ fn local_handshake(sock: TcpStream) -> impl Future<Item = TcpStream, Error = io:
     write_all(sock, buf).and_then(|(sock, _)| Ok(sock))
 }
 
-fn main() -> Result<(), failure::Error> {
-    env_logger::builder()
-        .default_format_timestamp(false)
-        .default_format_module_path(false)
-        .filter_level(LevelFilter::Info)
-        .init();
+fn launch_server(config: Arc<ServerConfig>) -> impl Future<Item = (), Error = ()> {
+    future::ok(unimplemented!())
+}
 
-    let matches = App::new("ss-rs")
-        .version("0.1")
-        .author("sbw <sbw@sbw.so>")
-        .about("Keep your connection secure!")
-        .arg(
-            Arg::with_name("config")
-                .long("--config")
-                .short("-c")
-                .value_name("FILE")
-                .takes_value(true)
-                .help("Configuration file"),
-        )
-        .get_matches();
-
-    let config_file = matches.value_of("config").unwrap();
-    let config = ClientConfig::from_file(&mut File::open(config_file)?)?;
-    let config = Arc::new(config);
-
+fn launch_client(config: Arc<ClientConfig>) -> impl Future<Item = (), Error = ()> {
     info!("ss-rs client listening on: {}", config.bind_addr());
-    let f = TcpListener::bind(config.bind_addr())
+
+    TcpListener::bind(config.bind_addr())
         .unwrap()
         .incoming()
         .map_err(|e| error!("Incoming Error: {:?}", e))
@@ -211,7 +192,57 @@ fn main() -> Result<(), failure::Error> {
                 });
 
             tokio::spawn(serv)
-        });
+        })
+}
 
-    Ok(tokio::run(f))
+fn main() -> Result<(), failure::Error> {
+    env_logger::builder()
+        .default_format_timestamp(false)
+        .default_format_module_path(false)
+        .filter_level(LevelFilter::Info)
+        .init();
+
+    let matches = App::new("ss-rs")
+        .version("0.1")
+        .author("sbw <sbw@sbw.so>")
+        .about("Keep your connection secure!")
+        .arg(
+            Arg::with_name("client")
+                .long("--client")
+                .help("Run as client mode"),
+        )
+        .arg(
+            Arg::with_name("server")
+                .long("--server")
+                .help("Run as server mode"),
+        )
+        .arg(
+            Arg::with_name("config")
+                .long("--config")
+                .short("-c")
+                .value_name("FILE")
+                .takes_value(true)
+                .help("Configuration file"),
+        )
+        .group(
+            ArgGroup::with_name("mode")
+                .args(&["client", "server"])
+                .required(true),
+        )
+        .get_matches();
+
+    let config_file = matches.value_of("config").unwrap();
+    let service: Box<dyn Future<Item = (), Error = ()> + Send> = if matches.is_present("client") {
+        let config = ClientConfig::from_file(&mut File::open(config_file)?)?;
+        let config = Arc::new(config);
+
+        Box::new(launch_client(config))
+    } else {
+        let config = ServerConfig::from_file(&mut File::open(config_file)?)?;
+        let config = Arc::new(config);
+
+        Box::new(launch_server(config))
+    };
+
+    Ok(tokio::run(service))
 }

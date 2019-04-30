@@ -34,6 +34,13 @@ impl ServerConfig {
     pub fn encrypt_method(&self) -> &str {
         &self.encrypt_method
     }
+
+    pub fn from_file(f: &mut File) -> Result<Self, failure::Error> {
+        let mut buf = String::new();
+        f.read_to_string(&mut buf)?;
+
+        toml::from_str(&buf).map_err(Into::into)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,7 +51,7 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
-    pub fn from_file(f: &mut File) -> Result<ClientConfig, failure::Error> {
+    pub fn from_file(f: &mut File) -> Result<Self, failure::Error> {
         let mut buf = String::new();
         f.read_to_string(&mut buf)?;
 
