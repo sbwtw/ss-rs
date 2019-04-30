@@ -33,7 +33,7 @@ cargo build --release
 ```
 
 ### Windows platform
-`OpenSSL` is required, and following environment variables must be set:
+`OpenSSL` is required([download](https://u.sbw.so/27s3Cc)), and following environment variables must be set:
 
 - OPENSSL_DIR
 - SSL_CERT_FILE
