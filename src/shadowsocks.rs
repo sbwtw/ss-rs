@@ -82,6 +82,7 @@ pub struct ShadowsocksStream<R> {
     reader: R,
     decryptor: Box<dyn ShadowsocksDecryptor + Send>,
     buffered: BytesMut,
+    decrypted: BytesMut,
 }
 
 impl<W> ShadowsocksSink<W>
@@ -104,6 +105,7 @@ impl<R: AsyncRead> ShadowsocksStream<R> {
             reader,
             decryptor,
             buffered: BytesMut::new(),
+            decrypted: BytesMut::new(),
         }
     }
 }
@@ -165,11 +167,10 @@ where
 
         self.buffered.extend(&buffer[..size]);
 
-        let mut decrypted = BytesMut::new();
         while let Some(data) = self.decryptor.decrypt(&mut self.buffered).unwrap() {
-            decrypted.extend(data);
+            self.decrypted.extend(data);
         }
 
-        Ok(Async::Ready(Some(decrypted.freeze())))
+        Ok(Async::Ready(Some(self.decrypted.take().freeze())))
     }
 }

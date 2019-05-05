@@ -1,11 +1,15 @@
 use bytes::buf::BufMut;
 use bytes::{Bytes, BytesMut};
+use futures::Future;
 use log::*;
 use md5;
 use ring::digest::SHA1;
 use ring::hkdf;
 use ring::hmac::SigningKey;
+use tokio::net::TcpStream;
+use tokio::prelude::*;
 
+use std::io;
 use std::sync::Arc;
 
 use crate::aes256cfb::*;
@@ -63,56 +67,84 @@ pub trait Cipher {
 
 pub struct CipherBuilder {
     config: Arc<ServerConfig>,
+    request_addr: Option<Arc<Socks5Addr>>,
+    cipher: Option<CipherWrapper>,
 }
 
 pub struct CipherWrapper {
-    inner: Box<dyn Cipher + Send>,
+    cipher: Box<dyn Cipher + Send>,
+    sock: TcpStream,
+}
+
+impl Future for CipherBuilder {
+    type Item = CipherWrapper;
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        Ok(Async::NotReady)
+    }
+}
+
+impl CipherWrapper {
+    pub fn into_inner(self) -> TcpStream {
+        self.sock
+    }
 }
 
 impl Cipher for CipherWrapper {
     fn key_length(&self) -> usize {
-        self.inner.key_length()
+        self.cipher.key_length()
     }
     fn iv_length(&self) -> usize {
-        self.inner.iv_length()
+        self.cipher.iv_length()
     }
     fn first_reply_length(&self) -> usize {
-        self.inner.first_reply_length()
+        self.cipher.first_reply_length()
     }
 
     fn first_sending_block(&mut self, addr: &[u8]) -> Bytes {
-        self.inner.first_sending_block(addr)
+        self.cipher.first_sending_block(addr)
     }
     fn set_opening_iv(&mut self, iv: &[u8]) {
-        self.inner.set_opening_iv(iv)
+        self.cipher.set_opening_iv(iv)
     }
 
     fn encrypt_data(&mut self, data: &[u8]) -> Bytes {
-        self.inner.encrypt_data(data)
+        self.cipher.encrypt_data(data)
     }
 
     fn take_encryptor(&mut self) -> Box<dyn ShadowsocksEncryptor + Send> {
-        self.inner.take_encryptor()
+        self.cipher.take_encryptor()
     }
     fn take_decryptor(&mut self) -> Box<dyn ShadowsocksDecryptor + Send> {
-        self.inner.take_decryptor()
+        self.cipher.take_decryptor()
     }
 }
 
 impl CipherBuilder {
-    pub fn new(config: Arc<ServerConfig>) -> Self {
-        Self { config }
-    }
-
-    pub fn build(self) -> CipherWrapper {
-        match self.config.encrypt_method().as_ref() {
+    pub fn new(sock: TcpStream, config: Arc<ServerConfig>) -> Self {
+        let cipher = match config.encrypt_method().as_ref() {
             "chacha20-ietf-poly1305" => CipherWrapper {
-                inner: Box::new(Chacha20Poly1305Cipher::new(self.config)),
+                cipher: Box::new(Chacha20Poly1305Cipher::new(config.clone())),
+                sock,
             },
             "aes-256-cfb" => CipherWrapper {
-                inner: Box::new(Aes256CfbCipher::new(self.config)),
+                cipher: Box::new(Aes256CfbCipher::new(config.clone())),
+                sock,
             },
             _ => panic!("Specificed cipher not supported!"),
+        };
+
+        Self {
+            config,
+            request_addr: None,
+            cipher: Some(cipher),
         }
+    }
+
+    pub fn request_addr(mut self, request_addr: Arc<Socks5Addr>) -> Self {
+        self.request_addr = Some(request_addr);
+
+        self
     }
 }

@@ -92,27 +92,27 @@ fn local_establish(
 
 fn try_server(
     config: Arc<ServerConfig>,
-    addr: &[u8],
-) -> impl Future<Item = (TcpStream, CipherWrapper), Error = io::Error> {
-    let mut cipher = CipherBuilder::new(config.clone()).build();
-    let data = cipher.first_sending_block(addr);
-    let read_len = cipher.first_reply_length();
-
+    request_addr: Arc<Socks5Addr>,
+) -> impl Future<Item = CipherWrapper, Error = io::Error> {
     let timeout = time::Duration::from_secs(3);
 
     TcpStream::connect(config.addr())
         .and_then(move |sock| {
-            // write handshake data
-            write_all(sock, data).and_then(move |(sock, _)| {
-                // got first reply
-                read_exact(sock, vec![0u8; read_len]).and_then(move |(sock, salt)| {
-                    trace!("recv-block: {:x?}", salt);
+            CipherBuilder::new(sock, config).request_addr(request_addr)
+            //let data = cipher.first_sending_block(addr);
+            //let read_len = cipher.first_reply_length();
 
-                    cipher.set_opening_iv(&salt[..]);
+            //// write handshake data
+            //write_all(sock, data).and_then(move |(sock, _)| {
+            //// got first reply
+            //read_exact(sock, vec![0u8; read_len]).and_then(move |(sock, salt)| {
+            //trace!("recv-block: {:x?}", salt);
 
-                    Ok((sock, cipher))
-                })
-            })
+            //cipher.set_opening_iv(&salt[..]);
+
+            //Ok((sock, cipher))
+            //})
+            //})
         })
         .timeout(timeout)
         .map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e.to_string()))
@@ -120,17 +120,17 @@ fn try_server(
 
 fn server_pick(
     servers: &Vec<ServerConfig>,
-    addr: &[u8],
-) -> impl Future<Item = (TcpStream, CipherWrapper), Error = io::Error> {
+    request_addr: Arc<Socks5Addr>,
+) -> impl Future<Item = CipherWrapper, Error = io::Error> {
     let iter = servers.iter().map(|config| {
         let c = Arc::new(config.clone());
 
-        try_server(c, addr)
+        try_server(c, request_addr.clone())
     });
 
     future::select_all(iter)
         .map_err(|(e, _, _)| e)
-        .map(|((sock, cipher), _, _)| (sock, cipher))
+        .map(|(cipher, _, _)| cipher)
 }
 
 fn local_handshake(sock: TcpStream) -> impl Future<Item = TcpStream, Error = io::Error> {
@@ -140,8 +140,48 @@ fn local_handshake(sock: TcpStream) -> impl Future<Item = TcpStream, Error = io:
     write_all(sock, buf).and_then(|(sock, _)| Ok(sock))
 }
 
+//fn serv_connection(
+//config: Arc<ServerConfig>,
+//addr: &[u8],
+//) -> impl Future<Item = (TcpStream, CipherWrapper), Error = io::Error> {
+//let mut cipher = CipherBuilder::new(config.clone()).build();
+//let data = cipher.first_sending_block(addr);
+//let read_len = cipher.first_reply_length();
+
+//let timeout = time::Duration::from_secs(3);
+
+//TcpStream::connect(config.addr())
+//.and_then(move |sock| {
+//// write handshake data
+//write_all(sock, data).and_then(move |(sock, _)| {
+//// got first reply
+//read_exact(sock, vec![0u8; read_len]).and_then(move |(sock, salt)| {
+//trace!("recv-block: {:x?}", salt);
+
+//cipher.set_opening_iv(&salt[..]);
+
+//Ok((sock, cipher))
+//})
+//})
+//})
+//.timeout(timeout)
+//.map_err(|e| io::Error::new(io::ErrorKind::TimedOut, e.to_string()))
+//}
+
 fn launch_server(config: Arc<ServerConfig>) -> impl Future<Item = (), Error = ()> {
-    future::ok(unimplemented!())
+    future::ok(())
+    //TcpListener::bind(config.addr())
+    //.unwrap()
+    //.incoming()
+    //.map_err(|e| error!("Incoming Error: {:?}", e))
+    //.for_each(move |sock| {
+    //trace!("Incoming from {:?}", sock.peer_addr());
+
+    //let mut cipher = CipherBuilder::new(config.clone()).build();
+    //let read_len = cipher.first_reply_length();
+
+    //Ok(())
+    //})
 }
 
 fn launch_client(config: Arc<ClientConfig>) -> impl Future<Item = (), Error = ()> {
@@ -160,24 +200,27 @@ fn launch_client(config: Arc<ClientConfig>) -> impl Future<Item = (), Error = ()
             let serv = local_establish(socket)
                 .map_err(|e| error!("Establish connection from local failed: {}", e))
                 .and_then(move |(local_sock, req_addr)| {
+                    let req_addr = Arc::new(req_addr);
                     let local = local_handshake(local_sock)
                         .map_err(|e| error!("Local handshake error: {}", e));
-                    let server = server_pick(config.server_list(), &req_addr.bytes())
+                    let server = server_pick(config.server_list(), req_addr.clone())
                         .map_err(|e| error!("Pick server error: {}", e));
 
-                    local.join(server).and_then(|(local, (remote, cipher))| {
-                        Ok(((local, req_addr), (remote, cipher)))
-                    })
+                    local
+                        .join(server)
+                        .and_then(|(local, cipher)| Ok(((local, req_addr), cipher)))
                 })
-                .and_then(|((local, req_addr), (remote, mut cipher))| {
-                    let lpeer = local.peer_addr().unwrap();
-                    let rpeer = remote.peer_addr().unwrap();
-                    info!("Relay {}: {} -> {}", req_addr, lpeer, rpeer);
+                .and_then(|((local, req_addr), mut cipher)| {
+                    //let lpeer = local.peer_addr().unwrap();
+                    //let rpeer = remote.peer_addr().unwrap();
+                    //info!("Relay {}: {} -> {}", req_addr, lpeer, rpeer);
 
                     let (lsink, lstream) = BytesCodec::new().framed(local).split();
-                    let (rr, rw) = remote.split();
-                    let rsink = ShadowsocksSink::new(rw, cipher.take_encryptor());
-                    let rstream = ShadowsocksStream::new(rr, cipher.take_decryptor());
+                    let encrypter = cipher.take_encryptor();
+                    let decrypter = cipher.take_decryptor();
+                    let (rr, rw) = cipher.into_inner().split();
+                    let rsink = ShadowsocksSink::new(rw, encrypter);
+                    let rstream = ShadowsocksStream::new(rr, decrypter);
 
                     let upload = lstream.forward(rsink);
                     let download = rstream.forward(lsink);
@@ -186,7 +229,7 @@ fn launch_client(config: Arc<ClientConfig>) -> impl Future<Item = (), Error = ()
                         .join(download)
                         .map_err(|e| error!("Transfer error: {}", e))
                         .and_then(move |_| {
-                            info!("Relay END for {}: {} -> {}", req_addr, lpeer, rpeer);
+                            //info!("Relay END for {}: {} -> {}", req_addr, lpeer, rpeer);
                             Ok(())
                         })
                 });
