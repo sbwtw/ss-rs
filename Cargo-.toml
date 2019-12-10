@@ -1,0 +1,22 @@
+[package]
+name = "ss-rs"
+version = "0.1.0"
+authors = ["石博文 <sbw@sbw.so>"]
+edition = "2018"
+
+[dependencies]
+futures = "*"
+tokio = "*"
+bytes = "*"
+failure = "*"
+log = "*"
+env_logger = "*"
+clap = "*"
+serde = "*"
+serde_derive = "*"
+toml = "*"
+rand = "*"
+ring = "*"
+md5 = "*"
+openssl = "*"
+
