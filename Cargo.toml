@@ -1,9 +1,17 @@
 [package]
-name = "async-test"
-version = "0.1.0"
+name = "ss-rs"
+version = "0.2.0"
 authors = ["石博文 <sbw@sbw.so>"]
 edition = "2018"
 
 [dependencies]
 async-std = "*"
 failure = "*"
+log = "*"
+env_logger = "*"
+clap = "*"
+serde = "*"
+serde_derive = "*"
+openssl = "*"
+bytes = "*"
+toml = "*"

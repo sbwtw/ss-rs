@@ -4,7 +4,12 @@ use async_std::net::{TcpListener, TcpStream};
 use async_std::prelude::*;
 use failure::{Fail, Error};
 
+use std::fs::File;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+mod config;
+
+use config::*;
 
 #[derive(Debug, Fail)]
 enum HandshakeError {
@@ -105,6 +110,7 @@ async fn socks5_handshake(mut stream: TcpStream) -> Result<(TcpStream, Socks5Add
 }
 
 async fn start_listener() -> Result<(), Error> {
+    let config = ClientConfig::from_file(&mut File::open("")?)?;
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
     let mut incoming = listener.incoming();
 
