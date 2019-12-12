@@ -6,6 +6,8 @@ use futures::sink::Sink;
 use std::fmt::{self, Formatter};
 use std::io;
 use std::net::IpAddr;
+use failure::_core::task::{Context, Poll};
+use failure::_core::pin::Pin;
 
 pub enum Socks5Host {
     Ip(IpAddr),
@@ -103,6 +105,39 @@ impl<R: AsyncRead> ShadowsocksStream<R> {
             decryptor,
             buffered: BytesMut::new(),
         }
+    }
+}
+
+impl<W> Sink<Bytes> for ShadowsocksSink<W>
+where W: AsyncWrite,
+{
+    type Error = ();
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        unimplemented!()
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: Bytes) -> Result<(), Self::Error> {
+        unimplemented!()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        unimplemented!()
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        unimplemented!()
+    }
+}
+
+impl<R> Stream for ShadowsocksStream<R>
+where
+    R: AsyncRead,
+{
+    type Item = Bytes;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        unimplemented!()
     }
 }
 
