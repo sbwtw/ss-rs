@@ -2,9 +2,8 @@ use bytes::buf::BufMut;
 use bytes::{Bytes, BytesMut};
 use log::*;
 use md5;
-use ring::digest::SHA1;
 use ring::hkdf;
-use ring::hmac::SigningKey;
+use ring::hmac::{Key, HMAC_SHA1_FOR_LEGACY_USE_ONLY};
 
 use std::sync::Arc;
 
@@ -43,7 +42,7 @@ pub trait Cipher {
     fn derivate_sub_key(&self, psk: &[u8], salt: &[u8]) -> Bytes {
         let key_length = self.key_length();
         let key = self.bytes_to_key(psk);
-        let salt = SigningKey::new(&SHA1, salt);
+        let salt = Key::new(HMAC_SHA1_FOR_LEGACY_USE_ONLY, salt);
 
         let mut skey = vec![0u8; key_length];
         hkdf::extract_and_expand(&salt, &key, b"ss-subkey", &mut skey);

@@ -1,9 +1,7 @@
 use bytes::buf::BufMut;
 use bytes::{Bytes, BytesMut};
+use futures::prelude::*;
 use futures::sink::Sink;
-use futures::try_ready;
-use futures::Async;
-use tokio::prelude::*;
 
 use std::fmt::{self, Formatter};
 use std::io;
@@ -39,12 +37,12 @@ impl Socks5Addr {
             Socks5Host::Ip(ip) => match ip {
                 IpAddr::V4(ipv4) => {
                     bytes.reserve(1 /* type */ + 4 /* max len of ipv4 */ + 2 /* port */);
-                    bytes.put(b'\x01'); // type for ipv4
+                    bytes.put_u8(b'\x01'); // type for ipv4
                     bytes.put(&ipv4.octets()[..]);
                 }
                 IpAddr::V6(ipv6) => {
                     bytes.reserve(1 /* type */ + 16 /* max len of ipv6 */ + 2 /* port */);
-                    bytes.put(b'\x04'); // type for ipv6
+                    bytes.put_u8(b'\x04'); // type for ipv6
                     bytes.put(&ipv6.octets()[..]);
                 }
             },
@@ -52,13 +50,13 @@ impl Socks5Addr {
                 bytes.reserve(
                     1 /* type */ + 1 /* domain len */ + domain.len() + 2, /* port */
                 );
-                bytes.put(b'\x03'); // type for domain
-                bytes.put(domain.len() as u8);
+                bytes.put_u8(b'\x03'); // type for domain
+                bytes.put_u8(domain.len() as u8);
                 bytes.put(domain.as_bytes());
             }
         }
 
-        bytes.put_u16_be(self.1); // write port
+        bytes.put_u16(self.1); // write port
         bytes
     }
 }
@@ -108,68 +106,67 @@ impl<R: AsyncRead> ShadowsocksStream<R> {
     }
 }
 
-impl<W> Sink for ShadowsocksSink<W>
-where
-    W: AsyncWrite,
-{
-    type SinkItem = BytesMut;
-    type SinkError = io::Error;
-
-    fn start_send(
-        &mut self,
-        item: Self::SinkItem,
-    ) -> Result<AsyncSink<Self::SinkItem>, Self::SinkError> {
-        // just buffered data. NOTE: maybe we should check buffered length?
-        self.buffered.extend(item);
-
-        Ok(AsyncSink::Ready)
-    }
-
-    fn poll_complete(&mut self) -> Result<Async<()>, Self::SinkError> {
-        if !self.buffered.is_empty() {
-            let encrypted_data = self.encryptor.encrypt(&mut self.buffered).unwrap();
-            self.encrypted.extend(encrypted_data);
-        }
-
-        match self.writer.poll_write(&self.encrypted[..])? {
-            Async::Ready(size) => {
-                self.encrypted.split_to(size);
-                if self.encrypted.is_empty() {
-                    return self.writer.poll_flush();
-                } else {
-                    return Ok(Async::NotReady);
-                }
-            }
-            Async::NotReady => {
-                return Ok(Async::NotReady);
-            }
-        };
-    }
-}
-
-impl<R> Stream for ShadowsocksStream<R>
-where
-    R: AsyncRead,
-{
-    type Item = Bytes;
-    type Error = io::Error;
-
-    fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
-        let mut buffer = [0u8; 1024 * 4];
-
-        let size = try_ready!(self.reader.poll_read(&mut buffer));
-        if size == 0 {
-            assert!(self.buffered.is_empty());
-            return Ok(Async::Ready(None));
-        }
-
-        self.buffered.extend(&buffer[..size]);
-
-        let mut decrypted = BytesMut::new();
-        while let Some(data) = self.decryptor.decrypt(&mut self.buffered).unwrap() {
-            decrypted.extend(data);
-        }
-
-        Ok(Async::Ready(Some(decrypted.freeze())))
-    }
-}
+//impl<W> Sink for ShadowsocksSink<W>
+//where
+//    W: AsyncWrite,
+//{
+//    type Error = io::Error;
+//
+//    fn start_send(
+//        self: Pin<&mut Self>,
+//        item: Item,
+//    ) -> Result<AsyncSink<Self::SinkItem>, Self::SinkError> {
+//         just buffered data. NOTE: maybe we should check buffered length?
+//        self.buffered.extend(item);
+//
+//        Ok(AsyncSink::Ready)
+//    }
+//
+//    fn poll_ready(self: Pin<&mut Self>, ctx: &mut Context) -> Result<Async<()>, Self::Error> {
+//        if !self.buffered.is_empty() {
+//            let encrypted_data = self.encryptor.encrypt(&mut self.buffered).unwrap();
+//            self.encrypted.extend(encrypted_data);
+//        }
+//
+//        match self.writer.poll_write(&self.encrypted[..])? {
+//            Async::Ready(size) => {
+//                self.encrypted.split_to(size);
+//                if self.encrypted.is_empty() {
+//                    return self.writer.poll_flush();
+//                } else {
+//                    return Ok(Async::NotReady);
+//                }
+//            }
+//            Async::NotReady => {
+//                return Ok(Async::NotReady);
+//            }
+//        };
+//    }
+//}
+//
+//impl<R> Stream for ShadowsocksStream<R>
+//where
+//    R: AsyncRead,
+//{
+//    type Item = Bytes;
+//
+//    fn poll_next(self: Pin<&mut Self>, ctx: &mut Context) -> Result<Async<Option<Self::Item>>, Self::Error> {
+//        let mut buffer = [0u8; 1024 * 4];
+//
+//        let size = self.reader.poll_read(&mut buffer)?;
+//        if size == 0 {
+//            assert!(self.buffered.is_empty());
+//            return Ok(Async::Ready(None));
+//        }
+//
+//        self.buffered.extend(&buffer[..size]);
+//
+//        let mut decrypted = BytesMut::new();
+//        while let Some(data) = self.decryptor.decrypt(&mut self.buffered).unwrap() {
+//            decrypted.extend(data);
+//        }
+//
+//        Ok(Async::Ready(Some(decrypted.freeze())))
+//    }
+//}
+//

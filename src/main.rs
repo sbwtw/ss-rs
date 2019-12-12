@@ -3,13 +3,21 @@ use async_std::task;
 use async_std::net::{TcpListener, TcpStream};
 use async_std::prelude::*;
 use failure::{Fail, Error};
+use log::*;
 
 use std::fs::File;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 mod config;
+//mod cipher;
+//mod aes256cfb;
+//mod chacha20poly1305;
+mod shadowsocks;
+mod utils;
 
 use config::*;
+use shadowsocks::{Socks5Host, Socks5Addr};
+//use cipher::CipherBuilder;
 
 #[derive(Debug, Fail)]
 enum HandshakeError {
@@ -20,15 +28,6 @@ enum HandshakeError {
     #[fail(display = "MethodSelectError")]
     MethodSelectError,
 }
-
-#[derive(Debug)]
-pub enum Socks5Host {
-    Ip(IpAddr),
-    Domain(String),
-}
-
-#[derive(Debug)]
-pub struct Socks5Addr(pub Socks5Host, pub u16);
 
 async fn socks5_handshake(mut stream: TcpStream) -> Result<(TcpStream, Socks5Addr), Error> {
     stream.set_nodelay(true)?;
@@ -109,9 +108,21 @@ async fn socks5_handshake(mut stream: TcpStream) -> Result<(TcpStream, Socks5Add
     Ok((stream, Socks5Addr(host, port)))
 }
 
+async fn serve_shadowsocks(mut stream: TcpStream) -> Result<(), Error> {
+    Ok(())
+}
+
+async fn connect_shadowsocks(mut stream: TcpStream, server: &ServerConfig) -> Result<TcpStream, Error> {
+//    let mut cipher = CipherBuilder::new(config.clone()).build();
+
+    Ok(stream)
+}
+
 async fn start_listener() -> Result<(), Error> {
-    let config = ClientConfig::from_file(&mut File::open("")?)?;
-    let listener = TcpListener::bind("127.0.0.1:8080").await?;
+    let config = ClientConfig::from_file(&mut File::open("example_config.toml")?)?;
+    let server_1 = &config.server_list()[0];
+
+    let listener = TcpListener::bind(config.bind_addr()).await?;
     let mut incoming = listener.incoming();
 
     while let Some(Ok(stream)) = incoming.next().await {
@@ -124,15 +135,21 @@ async fn start_listener() -> Result<(), Error> {
             }
         };
 
-        let mut buf = vec![];
-        stream.read_to_end(&mut buf).await?;
-        println!("{:?}", buf);
+        // handshake with remote ss server
+        let stream = connect_shadowsocks(stream, server_1).await?;
+
+        // serve
+        serve_shadowsocks(stream).await?;
     }
 
     unreachable!()
 }
 
 fn main() -> Result<(), Error> {
+    env_logger::builder()
+        .filter_level(LevelFilter::Info)
+        .init();
+
     task::block_on(async {
         start_listener().await
     })
